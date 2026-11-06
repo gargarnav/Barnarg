@@ -45,14 +45,22 @@ speed at M136279841 on an m4 macbook air (10 core gpu):
 | 1 | radix-16 passes in registers | 54 |
 | 2 | real input packed as N/2 complex | 35 |
 | 3 | carry through threadgroup memory, 3-multiply GF(M31^2) product | 29 |
+| 4 | radix-256 and radix-64 passes through threadgroup memory (3 passes per transform instead of 6), 8th roots of unity as rotations | 24.5 |
 
-prmers does 14 to 16 ms on the same machine, so barnarg is still about 2x slower. the fp32 passes already run near the 98 gb/s the m4 can do. the M31 passes don't (about 57 gb/s), since the twiddle powers are built by chained multiplies.
+prmers does 14 to 16 ms on the same machine, so barnarg is still about 1.6x slower.
+
+the 8th roots trick: the host picks the roots of unity so that W_8 = 2^15 (1 + i). that works because (2^15 (1 + i))^2 = 2^31 i = i. multiplying by any 8th root is then an add, a subtract and a 15-bit rotation, so radix-8 butterflies on the M31 side need no multiplies at all.
+
+where the time goes now (`--profile`, 24.5 ms total):
+
+- radix-256 passes: 1.1 ms each for fp32, 2.1 to 2.3 ms for M31. the M31 ones are slower than the maths says they should be, and i haven't found out why yet.
+- the radix-64 pass: 0.8 ms fp32, 1.1 ms M31.
+- weight 1.6 ms, tail 2.9 ms, carry 2.2 ms.
 
 next:
 
-- radix 256 to 512 per pass in threadgroup memory, so 3 passes per transform instead of 6.
-- M31 twiddles from a table.
-- fusing the weight, square and carry into the neighbouring passes.
+- work out why the M31 radix-256 pass is slow (occupancy, or the twiddle chain).
+- fusing the weight into the first pass, the tail into the passes either side of it, and the carry into the last one.
 - gerbicz error checks, prp proofs, save files and autoprimenet.
 
 ## build and run

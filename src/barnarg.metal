@@ -147,7 +147,18 @@ inline void dft_f(thread float2* v, constant float2* wr, uint inv) {
   }
 }
 
-template <uint R>
+// the host picks the roots so that W_8 = c = 2^15 (1 + i) (c^2 = 2^31 i = i). then any
+// 8th root of unity is an add/sub plus a 15-bit rotation, with no multiply.
+template <bool INV> inline uint2 mulc(uint2 a) {     // a * c, or a * conj(c) = a / c
+  return INV ? uint2(rot(addm(a.x, a.y), 15), rot(subm(a.y, a.x), 15))
+             : uint2(rot(subm(a.x, a.y), 15), rot(addm(a.x, a.y), 15));
+}
+template <bool INV> inline uint2 muli(uint2 a) { return INV ? uint2(a.y, subm(0u, a.x)) : uint2(subm(0u, a.y), a.x); }
+template <bool INV> inline uint2 mul8(uint2 a, uint t) {   // a * W_8^t, t < 4
+  return t == 0 ? a : t == 1 ? mulc<INV>(a) : t == 2 ? muli<INV>(a) : muli<INV>(mulc<INV>(a));
+}
+
+template <uint R, bool INV>
 inline void dft_m(thread uint2* v, constant uint2* wr) {
   uint2 y[R];
   #pragma unroll
@@ -156,7 +167,9 @@ inline void dft_m(thread uint2* v, constant uint2* wr) {
     for (uint jj = 0; jj < R / 2; ++jj) {
       uint kk = jj % ns;
       uint2 a = v[jj], b = v[jj + R / 2];
-      if (kk != 0) b = cmulm(b, wr[kk * (R / (2 * ns))]);
+      uint e = kk * (R / (2 * ns));                  // b *= W_R^e
+      if ((8 * e) % R == 0) b = mul8<INV>(b, 8 * e / R);
+      else b = cmulm(b, wr[e]);
       uint d = (jj / ns) * ns * 2 + kk;
       y[d] = uint2(addm(a.x, b.x), addm(a.y, b.y));
       y[d + ns] = uint2(subm(a.x, b.x), subm(a.y, b.y));
@@ -188,7 +201,7 @@ kernel void passf(device const float2* in [[buffer(0)]], device float2* out [[bu
   for (uint k = 0; k < R; ++k) out[base + k * Ns] = v[k];
 }
 
-template <uint R>
+template <uint R, bool INV>
 kernel void passm(device const uint2* in [[buffer(0)]], device uint2* out [[buffer(1)]],
                   device const uint2* tw [[buffer(2)]], constant uint2* wr [[buffer(3)]],
                   constant Prm& q [[buffer(4)]],
@@ -203,7 +216,7 @@ kernel void passm(device const uint2* in [[buffer(0)]], device uint2* out [[buff
     #pragma unroll
     for (uint k = 1; k < R; ++k) { v[k] = cmulm(v[k], wk); wk = cmulm(wk, w); }
   }
-  dft_m<R>(v, wr);
+  dft_m<R, INV>(v, wr);
   uint base = (j / Ns) * Ns * R + m;
   #pragma unroll
   for (uint k = 0; k < R; ++k) out[base + k * Ns] = v[k];
@@ -211,7 +224,8 @@ kernel void passm(device const uint2* in [[buffer(0)]], device uint2* out [[buff
 
 #define INST(R) \
   template [[host_name("passf" #R)]] kernel void passf<R>(device const float2*, device float2*, device const float2*, constant float2*, constant Prm&, constant uint&, uint); \
-  template [[host_name("passm" #R)]] kernel void passm<R>(device const uint2*, device uint2*, device const uint2*, constant uint2*, constant Prm&, uint);
+  template [[host_name("passm" #R "f")]] kernel void passm<R, false>(device const uint2*, device uint2*, device const uint2*, constant uint2*, constant Prm&, uint); \
+  template [[host_name("passm" #R "i")]] kernel void passm<R, true>(device const uint2*, device uint2*, device const uint2*, constant uint2*, constant Prm&, uint);
 INST(2) INST(4) INST(8) INST(16)
 
 // ---- real input packed as N/2 complex values ----
@@ -344,3 +358,88 @@ kernel void carry1t(device const float2* fz [[buffer(0)]], device const uint2* m
   maxe = simd_max(maxe);
   if (simd_is_first()) atomic_fetch_max_explicit(&stat[0], as_type<uint>(maxe), memory_order_relaxed);
 }
+
+// ---- radix R = A*A passes through threadgroup memory (R = 256 with A = 16, R = 64 with A = 8) ----
+// same stockham step as passf/passm, but the length-R dft is two length-A dfts with an
+// exchange in threadgroup memory between them. point k = A*k1 + k2.
+//   step 1: thread (i, k2) loads k1 = 0..A-1, twiddles, dft over k1, multiplies by W_R^(m1*k2)
+//   step 2: thread (i, m1) loads k2 = 0..A-1, dft over k2, writes output m = m1 + A*m2
+// J = 8 instances (consecutive j) per threadgroup, so loads for a fixed k are contiguous.
+// inter-pass twiddle W^((j%Ns)*k) = a * b^k1 with a = W^((j%Ns)*k2), b = W^((j%Ns)*A),
+// both read from the table, b^k1 by repeated multiplication.
+
+constant uint TJ = 8;
+
+template <uint A>
+kernel void passTf(device const float2* in [[buffer(0)]], device float2* out [[buffer(1)]],
+                   device const float2* tw [[buffer(2)]], constant float2* wa [[buffer(3)]],
+                   device const float2* wR [[buffer(4)]], constant Prm& q [[buffer(5)]], constant uint& inv [[buffer(6)]],
+                   uint g [[threadgroup_position_in_grid]], uint l [[thread_position_in_threadgroup]]) {
+  constexpr uint R = A * A, S = R + 1;
+  threadgroup float2 sh[TJ * S];
+  uint N = q.N, Ns = q.Ns, stride = N / R;
+  uint i = l % TJ, c = l / TJ;          // instance in the group, column (k2, then m1)
+  uint j = g * TJ + i, m = j % Ns;
+  float2 v[A];
+  #pragma unroll
+  for (uint k1 = 0; k1 < A; ++k1) v[k1] = in[j + (A * k1 + c) * stride];
+  if (Ns > 1) {
+    uint step = N / (Ns * R);
+    float2 a = tw[m * c * step], b = tw[m * A * step];
+    if (inv) { a.y = -a.y; b.y = -b.y; }
+    float2 w = a;
+    #pragma unroll
+    for (uint k1 = 0; k1 < A; ++k1) { v[k1] = cmulf(v[k1], w); w = cmulf(w, b); }
+  }
+  dft_f<A>(v, wa, inv);
+  #pragma unroll
+  for (uint m1 = 0; m1 < A; ++m1) {
+    float2 t = wR[m1 * c];
+    if (inv) t.y = -t.y;
+    sh[i * S + m1 * A + c] = cmulf(v[m1], t);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  #pragma unroll
+  for (uint k2 = 0; k2 < A; ++k2) v[k2] = sh[i * S + c * A + k2];
+  dft_f<A>(v, wa, inv);
+  uint base = (j / Ns) * Ns * R + m;
+  #pragma unroll
+  for (uint m2 = 0; m2 < A; ++m2) out[base + (c + A * m2) * Ns] = v[m2];
+}
+
+template <uint A, bool INV>
+kernel void passTm(device const uint2* in [[buffer(0)]], device uint2* out [[buffer(1)]],
+                   device const uint2* tw [[buffer(2)]], constant uint2* wa [[buffer(3)]],
+                   device const uint2* wR [[buffer(4)]], constant Prm& q [[buffer(5)]],
+                   uint g [[threadgroup_position_in_grid]], uint l [[thread_position_in_threadgroup]]) {
+  constexpr uint R = A * A, S = R + 1;
+  threadgroup uint2 sh[TJ * S];
+  uint N = q.N, Ns = q.Ns, stride = N / R;
+  uint i = l % TJ, c = l / TJ;
+  uint j = g * TJ + i, m = j % Ns;
+  uint2 v[A];
+  #pragma unroll
+  for (uint k1 = 0; k1 < A; ++k1) v[k1] = in[j + (A * k1 + c) * stride];
+  if (Ns > 1 && m != 0) {
+    uint step = N / (Ns * R);
+    uint2 w = tw[m * c * step], b = tw[m * A * step];
+    #pragma unroll
+    for (uint k1 = 0; k1 < A; ++k1) { v[k1] = cmulm(v[k1], w); w = cmulm(w, b); }
+  }
+  dft_m<A, INV>(v, wa);
+  #pragma unroll
+  for (uint m1 = 0; m1 < A; ++m1) sh[i * S + m1 * A + c] = (m1 * c) ? cmulm(v[m1], wR[m1 * c]) : v[m1];
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  #pragma unroll
+  for (uint k2 = 0; k2 < A; ++k2) v[k2] = sh[i * S + c * A + k2];
+  dft_m<A, INV>(v, wa);
+  uint base = (j / Ns) * Ns * R + m;
+  #pragma unroll
+  for (uint m2 = 0; m2 < A; ++m2) out[base + (c + A * m2) * Ns] = v[m2];
+}
+
+#define INSTT(A) \
+  template [[host_name("passTf" #A)]] kernel void passTf<A>(device const float2*, device float2*, device const float2*, constant float2*, device const float2*, constant Prm&, constant uint&, uint, uint); \
+  template [[host_name("passTm" #A "f")]] kernel void passTm<A, false>(device const uint2*, device uint2*, device const uint2*, constant uint2*, device const uint2*, constant Prm&, uint, uint); \
+  template [[host_name("passTm" #A "i")]] kernel void passTm<A, true>(device const uint2*, device uint2*, device const uint2*, constant uint2*, device const uint2*, constant Prm&, uint, uint);
+INSTT(8) INSTT(16)

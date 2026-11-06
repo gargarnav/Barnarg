@@ -30,7 +30,7 @@ func rootOfUnity(_ N: Int) -> (UInt64, UInt64) {
 var args = CommandLine.arguments.dropFirst().map { $0 }
 var kernelPath = "src/barnarg.metal"
 if let k = args.firstIndex(of: "--kernels") { kernelPath = args[k + 1]; args.removeSubrange(k...(k + 1)) }
-var maxRadix = 16   // 2 = plain radix-2 stages, 16 = radix-16 passes
+var maxRadix = 256  // 2 = plain radix-2 stages, 16 = radix-16 passes, 256 = threadgroup passes
 if let k = args.firstIndex(of: "--radix") { maxRadix = Int(args[k + 1])!; args.removeSubrange(k...(k + 1)) }
 let profileMode = CommandLine.arguments.contains("--profile")
 var pack = true      // real input packed as N/2 complex (needs maxRadix > 2)
@@ -62,7 +62,19 @@ for j in 0..<N {
 precondition(width.max()! <= 30 && width.min()! >= 2)
 var twf = [SIMD2<Float>](repeating: .zero, count: N / 2)
 for k in 0..<(N / 2) { let a = -2.0 * Double.pi * Double(k) / Double(N); twf[k] = SIMD2(Float(cos(a)), Float(sin(a))) }
-let w = rootOfUnity(N), winv = cpow(w.0, w.1, UInt64(N - 1))
+// pick the primitive N-th root whose N/8-th power is c = 2^15 (1 + i), so the kernels can
+// multiply by 8th roots of unity with rotations (see mulc in barnarg.metal)
+let c8: (UInt64, UInt64) = (1 << 15, 1 << 15)
+var w = rootOfUnity(N)
+if N >= 8 {
+  let w0 = w
+  for k in stride(from: UInt64(1), to: 8, by: 2) {
+    let cand = cpow(w0.0, w0.1, k)
+    if cpow(cand.0, cand.1, UInt64(N / 8)) == c8 { w = cand; break }
+  }
+  precondition(cpow(w.0, w.1, UInt64(N / 8)) == c8)
+}
+let winv = cpow(w.0, w.1, UInt64(N - 1))
 var twm = [SIMD2<UInt32>](repeating: .zero, count: N / 2), twmi = twm
 var c = (UInt64(1), UInt64(0)), ci = c
 for k in 0..<(N / 2) {
@@ -96,13 +108,35 @@ let TN = pack ? N / 2 : N          // transform length
 var radices: [Int] = []
 if maxRadix > 2 {
   var rem = TN.trailingZeroBitCount
+  if maxRadix >= 256 {
+    while rem >= 8 && TN >= 256 * 8 { radices.append(256); rem -= 8 }
+    if rem >= 6 && TN >= 64 * 8 { radices.append(64); rem -= 6 }
+  }
   while rem >= 4 { radices.append(16); rem -= 4 }
   if rem > 0 { radices.append(1 << rem) }
 }
-var kPF: [Int: MTLComputePipelineState] = [:], kPM: [Int: MTLComputePipelineState] = [:]
+let tgA: [Int: Int] = [256: 16, 64: 8]   // threadgroup passes: R = A * A
+var kPF: [Int: MTLComputePipelineState] = [:], kPM: [Int: MTLComputePipelineState] = [:], kPMi: [Int: MTLComputePipelineState] = [:]
 var wrF: [Int: MTLBuffer] = [:], wrM: [Int: MTLBuffer] = [:], wrMi: [Int: MTLBuffer] = [:]
-for R in Set(radices) {
-  kPF[R] = pso("passf\(R)"); kPM[R] = pso("passm\(R)")
+var wRF: [Int: MTLBuffer] = [:], wRM: [Int: MTLBuffer] = [:], wRMi: [Int: MTLBuffer] = [:]
+func cmulM(_ a: (UInt64, UInt64), _ b: (UInt64, UInt64)) -> (UInt64, UInt64) {
+  ((a.0 * b.0 % M31 + M31 - a.1 * b.1 % M31) % M31, (a.0 * b.1 % M31 + a.1 * b.0 % M31) % M31)
+}
+for R in Set(radices) where tgA[R] != nil {
+  let A = tgA[R]!
+  kPF[R] = pso("passTf\(A)"); kPM[R] = pso("passTm\(A)f"); kPMi[R] = pso("passTm\(A)i")
+  wrF[A] = buf((0..<(A / 2)).map { twf[$0 * N / A] })
+  wrM[A] = buf((0..<(A / 2)).map { twm[$0 * N / A] })
+  wrMi[A] = buf((0..<(A / 2)).map { twmi[$0 * N / A] })
+  wRF[R] = buf((0..<R).map { k -> SIMD2<Float> in let a = -2.0 * Double.pi * Double(k) / Double(R); return SIMD2(Float(cos(a)), Float(sin(a))) })
+  let r = cpow(w.0, w.1, UInt64(N / R)), ri = cpow(winv.0, winv.1, UInt64(N / R))
+  var x = (UInt64(1), UInt64(0)), xi = x
+  var tf = [SIMD2<UInt32>](), ti = [SIMD2<UInt32>]()
+  for _ in 0..<R { tf.append(SIMD2(UInt32(x.0), UInt32(x.1))); ti.append(SIMD2(UInt32(xi.0), UInt32(xi.1))); x = cmulM(x, r); xi = cmulM(xi, ri) }
+  wRM[R] = buf(tf); wRMi[R] = buf(ti)
+}
+for R in Set(radices) where tgA[R] == nil {
+  kPF[R] = pso("passf\(R)"); kPM[R] = pso("passm\(R)f"); kPMi[R] = pso("passm\(R)i")
   wrF[R] = buf((0..<(R / 2)).map { twf[$0 * N / R] })
   wrM[R] = buf((0..<(R / 2)).map { twm[$0 * N / R] })
   wrMi[R] = buf((0..<(R / 2)).map { twmi[$0 * N / R] })
@@ -120,6 +154,42 @@ func grid(_ e: MTLComputeCommandEncoder, _ k: MTLComputePipelineState, _ n: Int)
   e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: min(n, 256), height: 1, depth: 1))
 }
 
+// one stockham pass of radix R on both the fp32 and M31 buffers
+func encodePass(_ e: MTLComputeCommandEncoder, _ R: Int, _ Ns: Int, _ pass: Int,
+                _ fin: MTLBuffer, _ fout: MTLBuffer, _ min_: MTLBuffer, _ mout: MTLBuffer, fp: Bool = true, m31: Bool = true) {
+  var prm = Prm(N: UInt32(TN), Ns: UInt32(Ns), B: UInt32(B), logN: UInt32(logN))
+  var inv = UInt32(pass)
+  if let A = tgA[R] {
+    let groups = MTLSize(width: TN / R / 8, height: 1, depth: 1), threads = MTLSize(width: 8 * A, height: 1, depth: 1)
+    if fp {
+      e.setComputePipelineState(kPF[R]!)
+      e.setBuffer(fin, offset: 0, index: 0); e.setBuffer(fout, offset: 0, index: 1); e.setBuffer(bTwfT, offset: 0, index: 2)
+      e.setBuffer(wrF[A]!, offset: 0, index: 3); e.setBuffer(wRF[R]!, offset: 0, index: 4)
+      e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 5); e.setBytes(&inv, length: 4, index: 6)
+      e.dispatchThreadgroups(groups, threadsPerThreadgroup: threads)
+    }
+    if m31 {
+      e.setComputePipelineState(pass == 0 ? kPM[R]! : kPMi[R]!)
+      e.setBuffer(min_, offset: 0, index: 0); e.setBuffer(mout, offset: 0, index: 1); e.setBuffer(pass == 0 ? bTwmT : bTwmiT, offset: 0, index: 2)
+      e.setBuffer(pass == 0 ? wrM[A]! : wrMi[A]!, offset: 0, index: 3); e.setBuffer(pass == 0 ? wRM[R]! : wRMi[R]!, offset: 0, index: 4)
+      e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 5)
+      e.dispatchThreadgroups(groups, threadsPerThreadgroup: threads)
+    }
+    return
+  }
+  if fp {
+    e.setBuffer(fin, offset: 0, index: 0); e.setBuffer(fout, offset: 0, index: 1); e.setBuffer(bTwfT, offset: 0, index: 2)
+    e.setBuffer(wrF[R]!, offset: 0, index: 3); e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 4); e.setBytes(&inv, length: 4, index: 5)
+    grid(e, kPF[R]!, TN / R)
+  }
+  if m31 {
+    e.setBuffer(min_, offset: 0, index: 0); e.setBuffer(mout, offset: 0, index: 1)
+    e.setBuffer(pass == 0 ? bTwmT : bTwmiT, offset: 0, index: 2); e.setBuffer(pass == 0 ? wrM[R]! : wrMi[R]!, offset: 0, index: 3)
+    e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 4)
+    grid(e, pass == 0 ? kPM[R]! : kPMi[R]!, TN / R)
+  }
+}
+
 func encodeSquaring(_ e: MTLComputeCommandEncoder) {
   e.setBuffer(bDig, offset: 0, index: 0); e.setBuffer(fA, offset: 0, index: 1); e.setBuffer(mA, offset: 0, index: 2)
   e.setBuffer(bW, offset: 0, index: 3); e.setBuffer(bWexp, offset: 0, index: 4)
@@ -130,14 +200,7 @@ func encodeSquaring(_ e: MTLComputeCommandEncoder) {
     var Ns = 1
     if maxRadix > 2 {
       for R in radices {
-        var prm = Prm(N: UInt32(TN), Ns: UInt32(Ns), B: UInt32(B), logN: UInt32(logN))
-        e.setBuffer(fin, offset: 0, index: 0); e.setBuffer(fout, offset: 0, index: 1); e.setBuffer(bTwfT, offset: 0, index: 2)
-        e.setBuffer(wrF[R]!, offset: 0, index: 3); e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 4); e.setBytes(&inv, length: 4, index: 5)
-        grid(e, kPF[R]!, TN / R)
-        e.setBuffer(min_, offset: 0, index: 0); e.setBuffer(mout, offset: 0, index: 1)
-        e.setBuffer(pass == 0 ? bTwmT : bTwmiT, offset: 0, index: 2); e.setBuffer(pass == 0 ? wrM[R]! : wrMi[R]!, offset: 0, index: 3)
-        e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 4)
-        grid(e, kPM[R]!, TN / R)
+        encodePass(e, R, Ns, pass, fin, fout, min_, mout)
         swap(&fin, &fout); swap(&min_, &mout)
         Ns *= R
       }
@@ -198,17 +261,12 @@ if profileMode {
   var Ns = 1
   var total = 0.0
   for R in radices {
-    var prm = Prm(N: UInt32(TN), Ns: UInt32(Ns), B: UInt32(B), logN: UInt32(logN))
-    timeIt("passf\(R) Ns=\(Ns)", nb) { e in
-      e.setBuffer(fA, offset: 0, index: 0); e.setBuffer(fB, offset: 0, index: 1); e.setBuffer(bTwfT, offset: 0, index: 2)
-      e.setBuffer(wrF[R]!, offset: 0, index: 3); e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 4); e.setBytes(&inv, length: 4, index: 5)
-      grid(e, kPF[R]!, TN / R) }
-    timeIt("passm\(R) Ns=\(Ns)", nb) { e in
-      e.setBuffer(mA, offset: 0, index: 0); e.setBuffer(mB, offset: 0, index: 1); e.setBuffer(bTwmT, offset: 0, index: 2)
-      e.setBuffer(wrM[R]!, offset: 0, index: 3); e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 4)
-      grid(e, kPM[R]!, TN / R) }
+    let ns = Ns
+    timeIt("fp32 R=\(R) Ns=\(ns)", nb) { e in encodePass(e, R, ns, 0, fA, fB, mA, mB, m31: false) }
+    timeIt("m31  R=\(R) Ns=\(ns)", nb) { e in encodePass(e, R, ns, 0, fA, fB, mA, mB, fp: false) }
     Ns *= R
   }
+  _ = inv
   if pack {
     var prmN = Prm(N: UInt32(N), Ns: 0, B: UInt32(B), logN: UInt32(logN))
     timeIt("weight2", Double(N) * (4 + 4 + 1) + Double(TN) * 16) { e in
