@@ -32,9 +32,9 @@ works, not fast yet. every result so far matches gmp.
 
 | test | fft | result |
 |---|---|---|
-| M86243, full prp | 4096 | prime |
-| M86249, full prp | 4096 | composite, res64 `062d6633d5052b5f` |
-| M216091, full prp | 16384 | prime |
+| M86243, full prp | 4096 | prp (a known mersenne prime) |
+| M86249, full prp | 4096 | not prp, res64 `062d6633d5052b5f` |
+| M216091, full prp | 16384 | prp (a known mersenne prime) |
 | M136279841, 60 squarings | 8M | matches gmp, round-off 0.012 |
 
 speed at M136279841 on an m4 macbook air (10 core gpu):
