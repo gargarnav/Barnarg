@@ -64,6 +64,8 @@ where the time goes now (`--profile`, 13.3 ms total):
 - the middle kernel, 1.25 ms fp32 and 2.05 ms M31. the M31 one is limited by multiplies: the tail does 4M x 5 complex products, which matches the measured 72.7 billion modular multiplies a second.
 - the carry, 2.0 ms.
 
+i tried folding the carry into the last inverse pass: the M31 kernel did its last 256 point pass, read the fp32 result, did the crt and carried each 16 digit block in threadgroup memory. it was correct but not faster. 13.7 ms against 13.2 without it, and 14.3 when i also staged the digit stores. my guess is the extra threadgroup memory leaves too few groups per core to hide the memory latency. the separate carry kernel stays for now.
+
 ## gerbicz checks
 
 a hardware error in a week-long test wastes the whole week, so `--gerbicz` checks the work as it goes. x_k = 3^(2^k), and every L squarings barnarg multiplies a running product d by x:
@@ -88,7 +90,6 @@ the multiply (x times d, not a square) goes through the plain passes and a two-i
 
 next:
 
-- fold the carry into the last inverse pass.
 - a cheaper M31 multiply (it's about 10 integer ops now, not just the 2 multiplies).
 - prp proofs, save files and autoprimenet.
 
