@@ -36,6 +36,7 @@ let profileMode = CommandLine.arguments.contains("--profile")
 var pack = true      // real input packed as N/2 complex (needs maxRadix > 2)
 if let k = args.firstIndex(of: "--nopack") { pack = false; args.remove(at: k) }
 args.removeAll { $0 == "--profile" }
+let noMidFlag = args.contains("--nomid"); args.removeAll { $0 == "--nomid" }
 guard args.count >= 3, let p = Int(args[0]), let N = Int(args[1]), let iters = Int(args[2]) else {
   print("usage: barnarg_gpu P N ITERS [dumpfile k1,k2,...]"); exit(2)
 }
@@ -203,11 +204,49 @@ func encodePass(_ e: MTLComputeCommandEncoder, _ R: Int, _ Ns: Int, _ pass: Int,
   }
 }
 
+// fused middle (last forward pass + tail + first inverse pass), when the plan ends in 64
+let fuseMid = pack && maxRadix >= 256 && radices.count >= 2 && radices.last == 64 && TN / 64 >= 8
+let kMidF = pso("midf"), kMidM = pso("midm")
+var noMid = noMidFlag   // --nomid, for comparisons
+func encodeMid(_ e: MTLComputeCommandEncoder, _ fin: MTLBuffer, _ fout: MTLBuffer, _ min_: MTLBuffer, _ mout: MTLBuffer,
+               fp: Bool = true, m31: Bool = true) {
+  var prm = Prm(N: UInt32(TN), Ns: 0, B: UInt32(B), logN: UInt32(logN))
+  let groups = MTLSize(width: TN / 512, height: 1, depth: 1), threads = MTLSize(width: 64, height: 1, depth: 1)
+  if fp {
+    e.setComputePipelineState(kMidF)
+    e.setBuffer(fin, offset: 0, index: 0); e.setBuffer(fout, offset: 0, index: 1); e.setBuffer(bTwfT, offset: 0, index: 2)
+    e.setBuffer(wrF[8]!, offset: 0, index: 3); e.setBuffer(wRF[64]!, offset: 0, index: 4); e.setBuffer(bTwf, offset: 0, index: 5)
+    e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 6)
+    e.dispatchThreadgroups(groups, threadsPerThreadgroup: threads)
+  }
+  if m31 {
+    e.setComputePipelineState(kMidM)
+    e.setBuffer(min_, offset: 0, index: 0); e.setBuffer(mout, offset: 0, index: 1); e.setBuffer(bTwmT, offset: 0, index: 2)
+    e.setBuffer(wRM[64]!, offset: 0, index: 3); e.setBuffer(wRMi[64]!, offset: 0, index: 4); e.setBuffer(bTwm, offset: 0, index: 5)
+    e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 6)
+    e.dispatchThreadgroups(groups, threadsPerThreadgroup: threads)
+  }
+}
+
 func encodeSquaring(_ e: MTLComputeCommandEncoder) {
   e.setBuffer(bDig, offset: 0, index: 0); e.setBuffer(fA, offset: 0, index: 1); e.setBuffer(mA, offset: 0, index: 2)
   e.setBuffer(bW, offset: 0, index: 3); e.setBuffer(bWexp, offset: 0, index: 4)
   if !fuseWeight { grid(e, pack ? kW2 : kWeight, TN) }
   var fin = fA, fout = fB, min_ = mA, mout = mB
+  if fuseMid && !noMid {
+    var Ns = 1
+    for (ri, R) in radices.dropLast().enumerated() {
+      encodePass(e, R, Ns, 0, fin, fout, min_, mout, weighted: fuseWeight && ri == 0)
+      swap(&fin, &fout); swap(&min_, &mout); Ns *= R
+    }
+    encodeMid(e, fin, fout, min_, mout)
+    swap(&fin, &fout); swap(&min_, &mout)
+    Ns = 64
+    for R in radices.dropLast() {
+      encodePass(e, R, Ns, 1, fin, fout, min_, mout)
+      swap(&fin, &fout); swap(&min_, &mout); Ns *= R
+    }
+  } else {
   for pass in 0..<2 {   // 0 forward, 1 inverse
     var inv: UInt32 = UInt32(pass)
     var Ns = 1
@@ -243,6 +282,7 @@ func encodeSquaring(_ e: MTLComputeCommandEncoder) {
       e.setBuffer(fin, offset: 0, index: 0); e.setBuffer(min_, offset: 0, index: 1)
       grid(e, kSq, N)
     }
+  }
   }
   var prm = Prm(N: UInt32(N), Ns: 0, B: UInt32(B), logN: UInt32(logN))
   e.setBuffer(fin, offset: 0, index: 0); e.setBuffer(min_, offset: 0, index: 1); e.setBuffer(bDig, offset: 0, index: 2)
@@ -301,6 +341,10 @@ if profileMode {
     timeIt("carry2", Double(N) * 4) { e in
       e.setBuffer(bDig, offset: 0, index: 0); e.setBuffer(bCout, offset: 0, index: 1); e.setBuffer(bWidth, offset: 0, index: 2)
       e.setBuffer(bStat, offset: 0, index: 3); e.setBytes(&prmN, length: MemoryLayout<Prm>.size, index: 4); grid(e, kC2, N / B) }
+  }
+  if fuseMid {
+    timeIt("mid fp32", nb) { e in encodeMid(e, fA, fB, mA, mB, m31: false) }
+    timeIt("mid m31", nb) { e in encodeMid(e, fA, fB, mA, mB, fp: false) }
   }
   timeIt("full squaring", 0) { e in encodeSquaring(e) }
   _ = total

@@ -37,33 +37,36 @@ works, not fast yet. every result so far matches gmp.
 | M216091, full prp | 16384 | prp (a known mersenne prime) |
 | M136279841, 60 squarings | 8M | matches gmp, round-off 0.012 |
 
-speed at M136279841 on an m4 macbook air (10 core gpu):
+speed at M136279841 on an m4 macbook air (10 core gpu). whole numbers are big jumps (about 1.4x or more), decimals are smaller steps:
 
 | version | change | ms/iter |
 |---|---|---|
 | 0 | radix-2 stages, 92 passes over memory per squaring | 232 |
 | 1 | radix-16 passes in registers | 54 |
 | 2 | real input packed as N/2 complex | 35 |
-| 3 | carry through threadgroup memory, 3-multiply GF(M31^2) product | 29 |
-| 4 | radix-256 and radix-64 passes through threadgroup memory (3 passes per transform instead of 6), 8th roots of unity as rotations | 24.5 |
-| 5 | hand-written 16 and 8 point dfts (4x4 and 4x2), weighting folded into the first pass | 16.0 |
+| 2.1 | carry through threadgroup memory, 3-multiply GF(M31^2) product | 29 |
+| 2.2 | radix-256 and radix-64 passes through threadgroup memory (3 passes per transform instead of 6), 8th roots of unity as rotations | 24.5 |
+| 3 | hand-written 16 and 8 point dfts (4x4 and 4x2), weighting folded into the first pass | 16.0 |
+| 3.1 | last forward pass, tail and first inverse pass in one kernel; 2-multiply squaring in GF(M31^2) | 13.3 |
 
-over a 92 second run (5500 squarings) barnarg holds 16.7 ms, about 60 iterations per second. prmers averages about 68 over the same length of run, and that includes its gerbicz checks. so barnarg is still roughly 12% behind on this air, and doesn't have the checks yet.
+over an 80 second run (5500 squarings) barnarg holds 14.5 ms, about 69 iterations per second. prmers averages about 68 over the same length of run, and that includes its gerbicz checks. so they're level on this air, and barnarg doesn't have the checks yet.
 
 the 8th roots trick: the host picks the roots of unity so that W_8 = 2^15 (1 + i). that works because (2^15 (1 + i))^2 = 2^31 i = i. multiplying by any 8th root is then an add, a subtract and a 15-bit rotation, so radix-8 butterflies on the M31 side need no multiplies at all.
 
 the biggest single jump (24.5 to 16 ms) came from writing the 16 point dft out by hand. the generic loop version wasn't being fully unrolled, so its arrays ended up in slow memory. as 4x4, the 4 point dfts need no multiplies (W_4 = ±i) and only 3 of the 9 twiddles between them aren't 8th roots.
 
-where the time goes now (`--profile`, 16 ms total):
+the middle kernel works because of where things land. with the plan 256 x 256 x 64, the last forward pass leaves instance j holding Z[j + 65536 m]. the tail pairs k with M - k, which is in instance 65536 - j. so one threadgroup takes 4 instances and their 4 partners, finishes the forward dft, squares, and then runs the first inverse pass too, since an inverse plan that starts with 64 reads exactly those same 64 values. j = 0 and j = 32768 are their own partners.
 
-- 6 transform passes per direction, all at 63 to 91 gb/s, about 10.4 ms for both directions.
-- the tail (split, square, recombine), 2.7 ms, at only 50 gb/s.
+where the time goes now (`--profile`, 13.3 ms total):
+
+- 4 ordinary passes each way, 0.74 to 1.07 ms each.
+- the middle kernel, 1.25 ms fp32 and 2.05 ms M31. the M31 one is limited by multiplies: the tail does 4M x 5 complex products, which matches the measured 72.7 billion modular multiplies a second.
 - the carry, 2.0 ms.
 
 next:
 
-- fold the tail into the last forward pass and the first inverse pass.
 - fold the carry into the last inverse pass.
+- a cheaper M31 multiply (it's about 10 integer ops now, not just the 2 multiplies).
 - gerbicz error checks, prp proofs, save files and autoprimenet.
 
 ## build and run

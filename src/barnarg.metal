@@ -20,6 +20,10 @@ inline uint2 cmulm(uint2 a, uint2 b) {      // GF(M31^2), i^2 = -1; 3 multiplies
   uint s = mulm(red(a.x + a.y), red(b.x + b.y));
   return uint2(subm(ac, bd), subm(s, addm(ac, bd)));
 }
+inline uint2 csqm(uint2 a) {                 // a^2 in GF(M31^2) with 2 multiplies: (x+y)(x-y) + 2xy i
+  uint t = mulm(a.x, a.y);
+  return uint2(mulm(red(a.x + a.y), subm(a.x, a.y)), addm(t, t));
+}
 inline uint rot(uint x, uint e) {           // x * 2^e mod M31, x < P, e < 31
   return e == 0 ? x : (((x << e) & P) | (x >> (31 - e)));
 }
@@ -354,7 +358,7 @@ kernel void tail_m(device const uint2* Z [[buffer(0)]], device uint2* out [[buff
   uint2 w = tw[k];
   uint2 E = addc(a, b), O = mul_mim(subc(a, b)), t = cmulm(w, O);
   uint2 X1 = addc(E, t), X2 = subc(E, t);
-  uint2 Y1 = cmulm(X1, X1), Y2 = cmulm(X2, X2);
+  uint2 Y1 = csqm(X1), Y2 = csqm(X2);
   out[k] = addc(addc(Y1, Y2), mul_im(cmulm(subc(Y1, Y2), conjm(w))));
 }
 
@@ -546,3 +550,128 @@ kernel void passTm(device const uint2* in [[buffer(0)]], device uint2* out [[buf
   template [[host_name("passTm" #A "i")]] kernel void passTm<A, true, false>(TM_ARGS); \
   template [[host_name("passTm" #A "w")]] kernel void passTm<A, false, true>(TM_ARGS);
 INSTT(8) INSTT(16)
+
+// ---- fused middle: last forward pass + tail + first inverse pass ----
+// needs the forward plan to end with R = 64 (so Ns = M/64 there, and instance j holds
+// Z[j + Ns*m], m < 64) and the inverse plan to start with R = 64 at Ns = 1 (which reads
+// exactly the same 64 values). the tail pairs k with M - k, which lives in instance Ns - j,
+// so each group takes 4 instances j and their 4 partners. j = 0 and j = Ns/2 pair with
+// themselves; group 0 puts Ns/2 in the slot that would hold the partner of 0.
+// 8 slots x 8 threads, two 64-point dfts (8 x 8) each way.
+
+inline uint mid_slot_j(uint g, uint i, uint Ns) {
+  uint jA = 4 * g + (i & 3);
+  return i < 4 ? jA : (jA == 0 ? Ns / 2 : Ns - jA);
+}
+inline uint mid_partner(uint i, uint j, uint Ns) {
+  return i < 4 ? (j == 0 ? i : i + 4) : (j == Ns / 2 ? i : i - 4);
+}
+
+kernel void midf(device const float2* in [[buffer(0)]], device float2* out [[buffer(1)]],
+                 device const float2* twT [[buffer(2)]], constant float2* wa [[buffer(3)]],
+                 device const float2* wR [[buffer(4)]], device const float2* twN [[buffer(5)]],
+                 constant Prm& q [[buffer(6)]],
+                 uint g [[threadgroup_position_in_grid]], uint l [[thread_position_in_threadgroup]]) {
+  constexpr uint S = 65;
+  threadgroup float2 sa[8 * S], sb[8 * S];
+  uint M = q.N, Ns = M / 64;
+  uint i = l % 8, c = l / 8, j = mid_slot_j(g, i, Ns);
+  float2 v[8];
+  // forward: twiddle W_M^(j*k), then 8 x 8
+  #pragma unroll
+  for (uint k1 = 0; k1 < 8; ++k1) v[k1] = in[j + (8 * k1 + c) * Ns];
+  if (j) {
+    float2 w = twT[j * c], b = twT[j * 8];
+    #pragma unroll
+    for (uint k1 = 0; k1 < 8; ++k1) { v[k1] = cmulf(v[k1], w); w = cmulf(w, b); }
+  }
+  dft8f(v, wa, 0);
+  #pragma unroll
+  for (uint m1 = 0; m1 < 8; ++m1) sa[i * S + m1 * 8 + c] = cmulf(v[m1], wR[m1 * c]);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  #pragma unroll
+  for (uint k2 = 0; k2 < 8; ++k2) v[k2] = sa[i * S + c * 8 + k2];
+  dft8f(v, wa, 0);
+  #pragma unroll
+  for (uint m2 = 0; m2 < 8; ++m2) sb[i * S + c + 8 * m2] = v[m2];
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  // tail: same algebra as tail_f
+  uint ip = mid_partner(i, j, Ns);
+  #pragma unroll
+  for (uint t = 0; t < 8; ++t) {
+    uint m = c + 8 * t, k = j + Ns * m, kp = (M - k) & (M - 1), mp = kp / Ns;
+    float2 a = sb[i * S + m], b = conjf(sb[ip * S + mp]), w = twN[k];
+    float2 E = a + b, O = mul_mi(a - b), tt = cmulf(w, O);
+    float2 X1 = E + tt, X2 = E - tt;
+    float2 Y1 = cmulf(X1, X1), Y2 = cmulf(X2, X2);
+    sa[i * S + m] = (Y1 + Y2) + mul_i(cmulf(Y1 - Y2, conjf(w)));
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  // inverse, Ns = 1 (no inter-pass twiddle): points 0..63 of instance j are sa[i*S + 0..63]
+  #pragma unroll
+  for (uint k1 = 0; k1 < 8; ++k1) v[k1] = sa[i * S + 8 * k1 + c];
+  dft8f(v, wa, 1);
+  #pragma unroll
+  for (uint m1 = 0; m1 < 8; ++m1) sb[i * S + m1 * 8 + c] = cmulf(v[m1], conjf(wR[m1 * c]));
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  #pragma unroll
+  for (uint k2 = 0; k2 < 8; ++k2) v[k2] = sb[i * S + c * 8 + k2];
+  dft8f(v, wa, 1);
+  #pragma unroll
+  for (uint m2 = 0; m2 < 8; ++m2) out[j * 64 + c + 8 * m2] = v[m2];
+}
+
+kernel void midm(device const uint2* in [[buffer(0)]], device uint2* out [[buffer(1)]],
+                 device const uint2* twT [[buffer(2)]], device const uint2* wRf [[buffer(3)]],
+                 device const uint2* wRi [[buffer(4)]], device const uint2* twN [[buffer(5)]],
+                 constant Prm& q [[buffer(6)]],
+                 uint g [[threadgroup_position_in_grid]], uint l [[thread_position_in_threadgroup]]) {
+  constexpr uint S = 65;
+  threadgroup uint2 sa[8 * S], sb[8 * S];
+  uint M = q.N, Ns = M / 64;
+  uint i = l % 8, c = l / 8, j = mid_slot_j(g, i, Ns);
+  uint2 v[8];
+  #pragma unroll
+  for (uint k1 = 0; k1 < 8; ++k1) v[k1] = in[j + (8 * k1 + c) * Ns];
+  if (j) {
+    uint2 w = twT[j * c], b = twT[j * 8];
+    #pragma unroll
+    for (uint k1 = 0; k1 < 8; ++k1) { v[k1] = cmulm(v[k1], w); w = cmulm(w, b); }
+  }
+  dft8m<false>(v);
+  #pragma unroll
+  for (uint m1 = 0; m1 < 8; ++m1) sa[i * S + m1 * 8 + c] = (m1 * c) ? cmulm(v[m1], wRf[m1 * c]) : v[m1];
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  #pragma unroll
+  for (uint k2 = 0; k2 < 8; ++k2) v[k2] = sa[i * S + c * 8 + k2];
+  dft8m<false>(v);
+  #pragma unroll
+  for (uint m2 = 0; m2 < 8; ++m2) sb[i * S + c + 8 * m2] = v[m2];
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  uint ip = mid_partner(i, j, Ns);
+  #pragma unroll
+  for (uint t = 0; t < 8; ++t) {
+    uint m = c + 8 * t, k = j + Ns * m, kp = (M - k) & (M - 1), mp = kp / Ns;
+#ifdef SKIP_TAIL
+    sa[i * S + m] = sb[i * S + m] ^ sb[ip * S + mp];
+#else
+    uint2 a = sb[i * S + m], b = conjm(sb[ip * S + mp]), w = twN[k];
+    uint2 E = addc(a, b), O = mul_mim(subc(a, b)), tt = cmulm(w, O);
+    uint2 X1 = addc(E, tt), X2 = subc(E, tt);
+    uint2 Y1 = csqm(X1), Y2 = csqm(X2);
+    sa[i * S + m] = addc(addc(Y1, Y2), mul_im(cmulm(subc(Y1, Y2), conjm(w))));
+#endif
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  #pragma unroll
+  for (uint k1 = 0; k1 < 8; ++k1) v[k1] = sa[i * S + 8 * k1 + c];
+  dft8m<true>(v);
+  #pragma unroll
+  for (uint m1 = 0; m1 < 8; ++m1) sb[i * S + m1 * 8 + c] = (m1 * c) ? cmulm(v[m1], wRi[m1 * c]) : v[m1];
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  #pragma unroll
+  for (uint k2 = 0; k2 < 8; ++k2) v[k2] = sb[i * S + c * 8 + k2];
+  dft8m<true>(v);
+  #pragma unroll
+  for (uint m2 = 0; m2 < 8; ++m2) out[j * 64 + c + 8 * m2] = v[m2];
+}
