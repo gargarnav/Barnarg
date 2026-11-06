@@ -9,6 +9,8 @@ check: build/barnarg
 	python3 test/check.py build/m86243.bin 86243 --ref 20
 	./build/barnarg 216091 16384 1000 build/m216091.bin 1,20,1000
 	python3 test/check.py build/m216091.bin 216091 --ref 20
+	./build/barnarg 86243 4096 86243 --gerbicz --L 100 --C 50 | tail -1
+	./build/barnarg 86243 4096 86243 --gerbicz --L 100 --C 50 --inject 30000 | grep -E "FAILED|PRP"
 
 clean:
 	rm -rf build

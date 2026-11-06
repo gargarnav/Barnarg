@@ -28,7 +28,7 @@ at an 8M fft the fp32 side carries about 18.4 bits per word, the same as fp64 on
 
 ## status
 
-works, not fast yet. every result so far matches gmp.
+works, and level with prmers on speed. every result so far matches gmp.
 
 | test | fft | result |
 |---|---|---|
@@ -48,8 +48,9 @@ speed at M136279841 on an m4 macbook air (10 core gpu). whole numbers are big ju
 | 2.2 | radix-256 and radix-64 passes through threadgroup memory (3 passes per transform instead of 6), 8th roots of unity as rotations | 24.5 |
 | 3 | hand-written 16 and 8 point dfts (4x4 and 4x2), weighting folded into the first pass | 16.0 |
 | 3.1 | last forward pass, tail and first inverse pass in one kernel; 2-multiply squaring in GF(M31^2) | 13.3 |
+| 3.2 | gerbicz-li checks (about 0.4% slower with the default settings) | 13.3 |
 
-over an 80 second run (5500 squarings) barnarg holds 14.5 ms, about 69 iterations per second. prmers averages about 68 over the same length of run, and that includes its gerbicz checks. so they're level on this air, and barnarg doesn't have the checks yet.
+over an 80 second run (5500 squarings) barnarg holds 14.5 ms, about 69 iterations per second. prmers averages about 68 over the same length of run, and that includes its gerbicz checks. so they're level on this air. barnarg now has the same checks (below), which cost it about 0.4%.
 
 the 8th roots trick: the host picks the roots of unity so that W_8 = 2^15 (1 + i). that works because (2^15 (1 + i))^2 = 2^31 i = i. multiplying by any 8th root is then an add, a subtract and a 15-bit rotation, so radix-8 butterflies on the M31 side need no multiplies at all.
 
@@ -63,11 +64,33 @@ where the time goes now (`--profile`, 13.3 ms total):
 - the middle kernel, 1.25 ms fp32 and 2.05 ms M31. the M31 one is limited by multiplies: the tail does 4M x 5 complex products, which matches the measured 72.7 billion modular multiplies a second.
 - the carry, 2.0 ms.
 
+## gerbicz checks
+
+a hardware error in a week-long test wastes the whole week, so `--gerbicz` checks the work as it goes. x_k = 3^(2^k), and every L squarings barnarg multiplies a running product d by x:
+
+```
+d_t = x_0 * x_L * x_2L * ... * x_tL      so      d_t = 3 * d_(t-1)^(2^L)
+```
+
+every C blocks it squares the old d L more times, multiplies by 3 and compares. an error anywhere since the last check breaks the equation, and barnarg goes back to the last state that passed. the last ITERS mod L squarings are just done twice and compared.
+
+defaults are L = 1000 and C = 400, so a check every 400,000 squarings (about 1.6 hours here), plus one multiply per 1000 squarings. `--inject K` adds 1 to a digit at iteration K, to see it work:
+
+```sh
+./build/barnarg 86243 4096 86243 --gerbicz --L 100 --C 50 --inject 30000
+# injected an error into x at iteration 30000
+# k=30000  gerbicz check FAILED, going back to k=25000
+# ...
+# p=86243 N=4096 iters=86243  res64=0000000000000009  PRP  checks=19 failures=1
+```
+
+the multiply (x times d, not a square) goes through the plain passes and a two-input version of the tail kernel, since it only runs once per 1000 squarings.
+
 next:
 
 - fold the carry into the last inverse pass.
 - a cheaper M31 multiply (it's about 10 integer ops now, not just the 2 multiplies).
-- gerbicz error checks, prp proofs, save files and autoprimenet.
+- prp proofs, save files and autoprimenet.
 
 ## build and run
 
@@ -81,7 +104,7 @@ python3 test/check.py build/m86243.bin 86243
 # ok  k=  86243 value matches GMP  res64=0000000000000009  PRP=yes
 ```
 
-arguments are `p N iterations [dumpfile k1,k2,...]`. the dump has the digits at each checkpoint, which `test/check.py` compares against gmp (and against the cpu reference with `--ref K`). `--profile` times each kernel on its own.
+arguments are `p N iterations [dumpfile k1,k2,...]`, plus `--gerbicz` for a checked run. the dump has the digits at each checkpoint, which `test/check.py` compares against gmp (and against the cpu reference with `--ref K`). `--profile` times each kernel on its own.
 
 `make check` runs a small set of prps and compares them.
 

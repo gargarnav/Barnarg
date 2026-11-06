@@ -675,3 +675,30 @@ kernel void midm(device const uint2* in [[buffer(0)]], device uint2* out [[buffe
   #pragma unroll
   for (uint m2 = 0; m2 < 8; ++m2) out[j * 64 + c + 8 * m2] = v[m2];
 }
+
+// ---- general multiply a*b (used by the gerbicz check, once every L squarings) ----
+// same split as the tail, for two different packed inputs: X_k, X_{k+M} of each, then
+// multiply pointwise and recombine. scale is the same as squaring (2 * 2 = 4, then 8M overall).
+kernel void tailmul_f(device const float2* Za [[buffer(0)]], device const float2* Zb [[buffer(1)]],
+                      device float2* out [[buffer(2)]], device const float2* tw [[buffer(3)]],
+                      constant Prm& q [[buffer(4)]], uint k [[thread_position_in_grid]]) {
+  uint M = q.N / 2, kp = (M - k) & (M - 1);
+  float2 w = tw[k];
+  float2 a = Za[k], a2 = conjf(Za[kp]), b = Zb[k], b2 = conjf(Zb[kp]);
+  float2 Ea = a + a2, ta = cmulf(w, mul_mi(a - a2));
+  float2 Eb = b + b2, tb = cmulf(w, mul_mi(b - b2));
+  float2 Y1 = cmulf(Ea + ta, Eb + tb), Y2 = cmulf(Ea - ta, Eb - tb);
+  out[k] = (Y1 + Y2) + mul_i(cmulf(Y1 - Y2, conjf(w)));
+}
+
+kernel void tailmul_m(device const uint2* Za [[buffer(0)]], device const uint2* Zb [[buffer(1)]],
+                      device uint2* out [[buffer(2)]], device const uint2* tw [[buffer(3)]],
+                      constant Prm& q [[buffer(4)]], uint k [[thread_position_in_grid]]) {
+  uint M = q.N / 2, kp = (M - k) & (M - 1);
+  uint2 w = tw[k];
+  uint2 a = Za[k], a2 = conjm(Za[kp]), b = Zb[k], b2 = conjm(Zb[kp]);
+  uint2 Ea = addc(a, a2), ta = cmulm(w, mul_mim(subc(a, a2)));
+  uint2 Eb = addc(b, b2), tb = cmulm(w, mul_mim(subc(b, b2)));
+  uint2 Y1 = cmulm(addc(Ea, ta), addc(Eb, tb)), Y2 = cmulm(subc(Ea, ta), subc(Eb, tb));
+  out[k] = addc(addc(Y1, Y2), mul_im(cmulm(subc(Y1, Y2), conjm(w))));
+}

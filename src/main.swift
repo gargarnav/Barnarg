@@ -37,6 +37,14 @@ var pack = true      // real input packed as N/2 complex (needs maxRadix > 2)
 if let k = args.firstIndex(of: "--nopack") { pack = false; args.remove(at: k) }
 args.removeAll { $0 == "--profile" }
 let noMidFlag = args.contains("--nomid"); args.removeAll { $0 == "--nomid" }
+// --gerbicz: run ITERS squarings with gerbicz-li checks (block L, check every C blocks)
+let gerbicz = args.contains("--gerbicz"); args.removeAll { $0 == "--gerbicz" }
+func intFlag(_ name: String, _ def: Int?) -> Int? {
+  guard let k = args.firstIndex(of: name) else { return def }
+  let v = Int(args[k + 1]); args.removeSubrange(k...(k + 1)); return v
+}
+let gL = intFlag("--L", 1000)!, gC = intFlag("--C", 400)!
+let injectAt = intFlag("--inject", nil)   // add 1 to a digit of x once at this iteration (tests the check)
 guard args.count >= 3, let p = Int(args[0]), let N = Int(args[1]), let iters = Int(args[2]) else {
   print("usage: barnarg_gpu P N ITERS [dumpfile k1,k2,...]"); exit(2)
 }
@@ -99,6 +107,7 @@ let kWeight = pso("weight"), kFFT = pso("fft_f"), kNTT = pso("ntt_m"), kSq = pso
 func buf<T>(_ a: [T]) -> MTLBuffer { a.withUnsafeBytes { dev.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)! } }
 let bWidth = buf(width), bWexp = buf(wexp), bW = buf(w32), bIW = buf(iw32), bTwf = buf(twf), bTwm = buf(twm), bTwmi = buf(twmi)
 let bDig = dev.makeBuffer(length: N * 4, options: .storageModeShared)!
+var curDig = bDig   // the number the next encoded squaring works on
 let fA = dev.makeBuffer(length: N * 8, options: .storageModePrivate)!, fB = dev.makeBuffer(length: N * 8, options: .storageModePrivate)!
 let mA = dev.makeBuffer(length: N * 8, options: .storageModePrivate)!, mB = dev.makeBuffer(length: N * 8, options: .storageModePrivate)!
 let bCout = dev.makeBuffer(length: (N / B) * 8, options: .storageModePrivate)!
@@ -178,7 +187,7 @@ func encodePass(_ e: MTLComputeCommandEncoder, _ R: Int, _ Ns: Int, _ pass: Int,
       e.setBuffer(fin, offset: 0, index: 0); e.setBuffer(fout, offset: 0, index: 1); e.setBuffer(bTwfT, offset: 0, index: 2)
       e.setBuffer(wrF[A]!, offset: 0, index: 3); e.setBuffer(wRF[R]!, offset: 0, index: 4)
       e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 5); e.setBytes(&inv, length: 4, index: 6)
-      e.setBuffer(bDig, offset: 0, index: 7); e.setBuffer(bW, offset: 0, index: 8)
+      e.setBuffer(curDig, offset: 0, index: 7); e.setBuffer(bW, offset: 0, index: 8)
       e.dispatchThreadgroups(groups, threadsPerThreadgroup: threads)
     }
     if m31 {
@@ -186,7 +195,7 @@ func encodePass(_ e: MTLComputeCommandEncoder, _ R: Int, _ Ns: Int, _ pass: Int,
       e.setBuffer(min_, offset: 0, index: 0); e.setBuffer(mout, offset: 0, index: 1); e.setBuffer(pass == 0 ? bTwmT : bTwmiT, offset: 0, index: 2)
       e.setBuffer(pass == 0 ? wrM[A]! : wrMi[A]!, offset: 0, index: 3); e.setBuffer(pass == 0 ? wRM[R]! : wRMi[R]!, offset: 0, index: 4)
       e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 5)
-      e.setBuffer(bDig, offset: 0, index: 6); e.setBuffer(bWexp, offset: 0, index: 7)
+      e.setBuffer(curDig, offset: 0, index: 6); e.setBuffer(bWexp, offset: 0, index: 7)
       e.dispatchThreadgroups(groups, threadsPerThreadgroup: threads)
     }
     return
@@ -229,7 +238,7 @@ func encodeMid(_ e: MTLComputeCommandEncoder, _ fin: MTLBuffer, _ fout: MTLBuffe
 }
 
 func encodeSquaring(_ e: MTLComputeCommandEncoder) {
-  e.setBuffer(bDig, offset: 0, index: 0); e.setBuffer(fA, offset: 0, index: 1); e.setBuffer(mA, offset: 0, index: 2)
+  e.setBuffer(curDig, offset: 0, index: 0); e.setBuffer(fA, offset: 0, index: 1); e.setBuffer(mA, offset: 0, index: 2)
   e.setBuffer(bW, offset: 0, index: 3); e.setBuffer(bWexp, offset: 0, index: 4)
   if !fuseWeight { grid(e, pack ? kW2 : kWeight, TN) }
   var fin = fA, fout = fB, min_ = mA, mout = mB
@@ -285,16 +294,100 @@ func encodeSquaring(_ e: MTLComputeCommandEncoder) {
   }
   }
   var prm = Prm(N: UInt32(N), Ns: 0, B: UInt32(B), logN: UInt32(logN))
-  e.setBuffer(fin, offset: 0, index: 0); e.setBuffer(min_, offset: 0, index: 1); e.setBuffer(bDig, offset: 0, index: 2)
+  e.setBuffer(fin, offset: 0, index: 0); e.setBuffer(min_, offset: 0, index: 1); e.setBuffer(curDig, offset: 0, index: 2)
   e.setBuffer(bCout, offset: 0, index: 3); e.setBuffer(bIW, offset: 0, index: 4); e.setBuffer(bWexp, offset: 0, index: 5)
   e.setBuffer(bWidth, offset: 0, index: 6); e.setBuffer(bStat, offset: 0, index: 7); e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 8)
   if useC1T {
     e.setComputePipelineState(kC1T)
     e.dispatchThreadgroups(MTLSize(width: N / 2048, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
   } else { grid(e, pack ? kC1P : kC1, N / B) }
-  e.setBuffer(bDig, offset: 0, index: 0); e.setBuffer(bCout, offset: 0, index: 1); e.setBuffer(bWidth, offset: 0, index: 2)
+  e.setBuffer(curDig, offset: 0, index: 0); e.setBuffer(bCout, offset: 0, index: 1); e.setBuffer(bWidth, offset: 0, index: 2)
   e.setBuffer(bStat, offset: 0, index: 3); e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 4)
   grid(e, kC2, N / B)
+}
+
+// carry of the inverse transform in (fin, min_) into curDig
+func encodeCarry(_ e: MTLComputeCommandEncoder, _ fin: MTLBuffer, _ min_: MTLBuffer) {
+  var prm = Prm(N: UInt32(N), Ns: 0, B: UInt32(B), logN: UInt32(logN))
+  e.setBuffer(fin, offset: 0, index: 0); e.setBuffer(min_, offset: 0, index: 1); e.setBuffer(curDig, offset: 0, index: 2)
+  e.setBuffer(bCout, offset: 0, index: 3); e.setBuffer(bIW, offset: 0, index: 4); e.setBuffer(bWexp, offset: 0, index: 5)
+  e.setBuffer(bWidth, offset: 0, index: 6); e.setBuffer(bStat, offset: 0, index: 7); e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 8)
+  if useC1T {
+    e.setComputePipelineState(kC1T)
+    e.dispatchThreadgroups(MTLSize(width: N / 2048, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+  } else { grid(e, kC1P, N / B) }
+  e.setBuffer(curDig, offset: 0, index: 0); e.setBuffer(bCout, offset: 0, index: 1); e.setBuffer(bWidth, offset: 0, index: 2)
+  e.setBuffer(bStat, offset: 0, index: 3); e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 4)
+  grid(e, kC2, N / B)
+}
+
+// a = a * b mod M_p. slow path (no fused passes), only used once every L squarings.
+let kTMF = pso("tailmul_f"), kTMM = pso("tailmul_m")
+let fC = dev.makeBuffer(length: N * 8, options: .storageModePrivate)!, fD = dev.makeBuffer(length: N * 8, options: .storageModePrivate)!
+let mC = dev.makeBuffer(length: N * 8, options: .storageModePrivate)!, mD = dev.makeBuffer(length: N * 8, options: .storageModePrivate)!
+func encodeForward(_ e: MTLComputeCommandEncoder, _ digits: MTLBuffer,
+                   _ f0: MTLBuffer, _ f1: MTLBuffer, _ m0: MTLBuffer, _ m1: MTLBuffer) -> (MTLBuffer, MTLBuffer) {
+  e.setBuffer(digits, offset: 0, index: 0); e.setBuffer(f0, offset: 0, index: 1); e.setBuffer(m0, offset: 0, index: 2)
+  e.setBuffer(bW, offset: 0, index: 3); e.setBuffer(bWexp, offset: 0, index: 4)
+  grid(e, kW2, TN)
+  var fin = f0, fout = f1, min_ = m0, mout = m1, Ns = 1
+  for R in radices { encodePass(e, R, Ns, 0, fin, fout, min_, mout); swap(&fin, &fout); swap(&min_, &mout); Ns *= R }
+  return (fin, min_)
+}
+func encodeMul(_ e: MTLComputeCommandEncoder, _ a: MTLBuffer, _ b: MTLBuffer) {
+  precondition(pack && maxRadix > 2)
+  let (fb, mb) = encodeForward(e, b, fC, fD, mC, mD)
+  let (fa, ma) = encodeForward(e, a, fA, fB, mA, mB)
+  let fo = fa === fA ? fB : fA, mo = ma === mA ? mB : mA
+  var prm = Prm(N: UInt32(N), Ns: 0, B: UInt32(B), logN: UInt32(logN))
+  e.setBuffer(fa, offset: 0, index: 0); e.setBuffer(fb, offset: 0, index: 1); e.setBuffer(fo, offset: 0, index: 2)
+  e.setBuffer(bTwf, offset: 0, index: 3); e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 4)
+  grid(e, kTMF, TN)
+  e.setBuffer(ma, offset: 0, index: 0); e.setBuffer(mb, offset: 0, index: 1); e.setBuffer(mo, offset: 0, index: 2)
+  e.setBuffer(bTwm, offset: 0, index: 3); e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 4)
+  grid(e, kTMM, TN)
+  var fin = fo, fout = fa, min_ = mo, mout = ma, Ns = 1
+  for R in radices { encodePass(e, R, Ns, 1, fin, fout, min_, mout); swap(&fin, &fout); swap(&min_, &mout); Ns *= R }
+  curDig = a
+  encodeCarry(e, fin, min_)
+}
+
+// ---- reading numbers back on the cpu ----
+// value mod q = 2^61 - 1 (2^61 = 1 mod q, so digit j weighs 2^(s_j mod 61)), used to compare
+// two numbers that may be written with different balanced digits, and res64 (low 64 bits).
+let q61: UInt64 = (1 << 61) - 1
+let sExp: [Int] = (0..<N).map { ceilDiv($0 * p, N) }
+func mod61(_ x: UInt64, _ y: UInt64) -> UInt64 {
+  let (hi, lo) = x.multipliedFullWidth(by: y)
+  var r = (lo & q61) + (lo >> 61) + (hi << 3)
+  r = (r & q61) + (r >> 61)
+  return r >= q61 ? r - q61 : r
+}
+let mpMod61: UInt64 = ((1 << UInt64(p % 61)) - 1) % q61
+func hash61(_ b: MTLBuffer) -> UInt64 {
+  let d = b.contents().bindMemory(to: Int32.self, capacity: N)
+  var sum = [Int64](repeating: 0, count: 61)
+  for j in 0..<N { sum[sExp[j] % 61] += Int64(d[j]) }
+  var h: UInt64 = 0
+  for e in 0..<61 {
+    let v = UInt64(((sum[e] % Int64(q61)) + Int64(q61)) % Int64(q61))
+    h = (h + mod61(v, 1 << UInt64(e))) % q61
+  }
+  return h
+}
+func sameValue(_ a: MTLBuffer, _ b: MTLBuffer) -> Bool {
+  if memcmp(a.contents(), b.contents(), N * 4) == 0 { return true }
+  let ha = hash61(a), hb = hash61(b)
+  return ha == hb || (ha + mpMod61) % q61 == hb || (hb + mpMod61) % q61 == ha
+}
+func res64(_ b: MTLBuffer) -> UInt64 {   // low 64 bits of the value in [0, M_p)
+  let d = b.contents().bindMemory(to: Int32.self, capacity: N)
+  var v: UInt64 = 0
+  for j in 0..<N where sExp[j] < 64 { v = v &+ (UInt64(bitPattern: Int64(d[j])) << UInt64(sExp[j])) }
+  var top = N - 1
+  while top > 0 && d[top] == 0 { top -= 1 }
+  if d[top] < 0 { v = v &- 1 }           // negative: add M_p = 2^p - 1, which is -1 mod 2^64
+  return v
 }
 
 // --profile: time each kernel type alone (10 repeats in one command buffer) and report GB/s
@@ -349,6 +442,106 @@ if profileMode {
   timeIt("full squaring", 0) { e in encodeSquaring(e) }
   _ = total
   exit(0)
+}
+
+// ---- PRP with gerbicz-li checks ----
+// x_k = 3^(2^k). every L squarings d <- d * x, so d_t = x_0 x_L ... x_tL. that gives
+// d_t = 3 * d_(t-1)^(2^L), and an error anywhere since the last check breaks it. every C blocks
+// we check it (L extra squarings of the old d), and on a failure go back to the last good state.
+// the last ITERS mod L squarings are done twice and compared instead.
+if gerbicz {
+  precondition(pack && maxRadix > 2, "gerbicz mode needs the packed transform")
+  let L = gL, C = gC
+  func newDigits() -> MTLBuffer { let b = dev.makeBuffer(length: N * 4, options: .storageModeShared)!; memset(b.contents(), 0, N * 4); return b }
+  let bD = newDigits(), bT = newDigits(), bThree = newDigits()
+  bD.contents().bindMemory(to: Int32.self, capacity: N)[0] = 3
+  bThree.contents().bindMemory(to: Int32.self, capacity: N)[0] = 3
+  func copyDigits(_ to: MTLBuffer, _ from: MTLBuffer) { memcpy(to.contents(), from.contents(), N * 4) }
+  var savedX = [Int32](repeating: 0, count: N), savedD = savedX, savedK = 0
+  func save(_ k: Int) {
+    savedX.withUnsafeMutableBytes { _ = memcpy($0.baseAddress!, bDig.contents(), N * 4) }
+    savedD.withUnsafeMutableBytes { _ = memcpy($0.baseAddress!, bD.contents(), N * 4) }
+    savedK = k
+  }
+  func restore() -> Int {
+    savedX.withUnsafeBytes { _ = memcpy(bDig.contents(), $0.baseAddress!, N * 4) }
+    savedD.withUnsafeBytes { _ = memcpy(bD.contents(), $0.baseAddress!, N * 4) }
+    return savedK
+  }
+  var gpu = 0.0
+  func run(_ body: (MTLComputeCommandEncoder) -> Void) {
+    let cb = q.makeCommandBuffer()!, e = cb.makeComputeCommandEncoder()!
+    body(e); e.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    if let err = cb.error { print("gpu error:", err); exit(1) }
+    gpu += cb.gpuEndTime - cb.gpuStartTime
+  }
+  func square(_ b: MTLBuffer, _ n: Int) {
+    var left = n
+    while left > 0 {
+      let m = min(left, 256)
+      run { e in for _ in 0..<m { curDig = b; encodeSquaring(e) } }
+      left -= m
+    }
+  }
+  save(0)
+  var k = 0, checks = 0, failures = 0, injected = false
+  let kFull = iters / L * L
+  let start = Date()
+  while k < kFull {
+    square(bDig, L); k += L
+    if let at = injectAt, !injected, k >= at {
+      bDig.contents().bindMemory(to: Int32.self, capacity: N)[1] += 1
+      injected = true
+      print("injected an error into x at iteration \(k)")
+    }
+    let checkNow = k % (C * L) == 0 || k == kFull
+    if checkNow { copyDigits(bT, bD) }
+    run { e in encodeMul(e, bD, bDig) }
+    if checkNow {
+      square(bT, L)
+      run { e in encodeMul(e, bT, bThree) }
+      checks += 1
+      if sameValue(bT, bD) {
+        save(k)
+        let el = Date().timeIntervalSince(start)
+        print(String(format: "k=%d  check ok  res64=%016llx  %.1f iter/s", k, res64(bDig), Double(k) / el))
+      } else {
+        failures += 1
+        let bad = k
+        k = restore()
+        print("k=\(bad)  gerbicz check FAILED, going back to k=\(k)")
+      }
+    }
+  }
+  let r = iters - kFull
+  if r > 0 {
+    while true {
+      copyDigits(bT, bDig)
+      square(bDig, r); square(bT, r)
+      if let at = injectAt, !injected, at > kFull {
+        bDig.contents().bindMemory(to: Int32.self, capacity: N)[1] += 1
+        injected = true
+        print("injected an error into x in the last \(r) squarings")
+      }
+      if sameValue(bT, bDig) { break }
+      failures += 1
+      print("last \(r) squarings disagreed, redoing them")
+      _ = restore()
+    }
+  }
+  let st = bStat.contents().bindMemory(to: UInt32.self, capacity: 4)
+  let rv = res64(bDig)
+  let isPRP = rv == 9 && (hash61(bDig) == 9 || (hash61(bDig) + mpMod61) % q61 == 9)
+  let el = Date().timeIntervalSince(start)
+  print(String(format: "p=%d N=%d iters=%d  res64=%016llx  %@  checks=%d failures=%d  roundoff=%.4f  %.1f iter/s (wall, checks included)",
+               p, N, iters, rv, iters == p ? (isPRP ? "PRP" : "not PRP") : "", checks, failures, Float(bitPattern: st[0]), Double(iters) / el))
+  if let dp = dumpPath {
+    FileManager.default.createFile(atPath: dp, contents: nil)
+    let d = FileHandle(forWritingAtPath: dp)!
+    var hdr: [UInt32] = [UInt32(iters), UInt32(N)]
+    d.write(Data(bytes: &hdr, count: 8)); d.write(Data(bytes: bDig.contents(), count: N * 4)); d.closeFile()
+  }
+  exit(failures > 0 && injectAt == nil ? 3 : 0)
 }
 
 var dump: FileHandle? = nil
