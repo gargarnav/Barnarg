@@ -86,7 +86,13 @@ for k in 0..<(N / 2) {
 // ---- Metal setup ----
 let dev = MTLCreateSystemDefaultDevice()!
 let src = try! String(contentsOfFile: kernelPath, encoding: .utf8)
-let lib = try! dev.makeLibrary(source: src, options: nil)
+let copts = MTLCompileOptions()
+if let defs = ProcessInfo.processInfo.environment["BARNARG_DEFS"] {   // timing experiments only
+  var m: [String: NSObject] = [:]
+  for d in defs.split(separator: ",") { m[String(d)] = NSNumber(value: 1) }
+  copts.preprocessorMacros = m
+}
+let lib = try! dev.makeLibrary(source: src, options: copts)
 func pso(_ n: String) -> MTLComputePipelineState { try! dev.makeComputePipelineState(function: lib.makeFunction(name: n)!) }
 let kWeight = pso("weight"), kFFT = pso("fft_f"), kNTT = pso("ntt_m"), kSq = pso("square"), kC1 = pso("carry1"), kC2 = pso("carry2")
 func buf<T>(_ a: [T]) -> MTLBuffer { a.withUnsafeBytes { dev.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)! } }
@@ -117,6 +123,7 @@ if maxRadix > 2 {
 }
 let tgA: [Int: Int] = [256: 16, 64: 8]   // threadgroup passes: R = A * A
 var kPF: [Int: MTLComputePipelineState] = [:], kPM: [Int: MTLComputePipelineState] = [:], kPMi: [Int: MTLComputePipelineState] = [:]
+var kPFw: [Int: MTLComputePipelineState] = [:], kPMw: [Int: MTLComputePipelineState] = [:]
 var wrF: [Int: MTLBuffer] = [:], wrM: [Int: MTLBuffer] = [:], wrMi: [Int: MTLBuffer] = [:]
 var wRF: [Int: MTLBuffer] = [:], wRM: [Int: MTLBuffer] = [:], wRMi: [Int: MTLBuffer] = [:]
 func cmulM(_ a: (UInt64, UInt64), _ b: (UInt64, UInt64)) -> (UInt64, UInt64) {
@@ -125,6 +132,7 @@ func cmulM(_ a: (UInt64, UInt64), _ b: (UInt64, UInt64)) -> (UInt64, UInt64) {
 for R in Set(radices) where tgA[R] != nil {
   let A = tgA[R]!
   kPF[R] = pso("passTf\(A)"); kPM[R] = pso("passTm\(A)f"); kPMi[R] = pso("passTm\(A)i")
+  kPFw[R] = pso("passTf\(A)w"); kPMw[R] = pso("passTm\(A)w")
   wrF[A] = buf((0..<(A / 2)).map { twf[$0 * N / A] })
   wrM[A] = buf((0..<(A / 2)).map { twm[$0 * N / A] })
   wrMi[A] = buf((0..<(A / 2)).map { twmi[$0 * N / A] })
@@ -155,24 +163,29 @@ func grid(_ e: MTLComputeCommandEncoder, _ k: MTLComputePipelineState, _ n: Int)
 }
 
 // one stockham pass of radix R on both the fp32 and M31 buffers
+// weighted: first forward pass reads the digits itself (fused weight); fin/min_ are ignored then
+let fuseWeight = pack && radices.first.map { tgA[$0] != nil } == true
 func encodePass(_ e: MTLComputeCommandEncoder, _ R: Int, _ Ns: Int, _ pass: Int,
-                _ fin: MTLBuffer, _ fout: MTLBuffer, _ min_: MTLBuffer, _ mout: MTLBuffer, fp: Bool = true, m31: Bool = true) {
+                _ fin: MTLBuffer, _ fout: MTLBuffer, _ min_: MTLBuffer, _ mout: MTLBuffer, fp: Bool = true, m31: Bool = true,
+                weighted: Bool = false) {
   var prm = Prm(N: UInt32(TN), Ns: UInt32(Ns), B: UInt32(B), logN: UInt32(logN))
   var inv = UInt32(pass)
   if let A = tgA[R] {
     let groups = MTLSize(width: TN / R / 8, height: 1, depth: 1), threads = MTLSize(width: 8 * A, height: 1, depth: 1)
     if fp {
-      e.setComputePipelineState(kPF[R]!)
+      e.setComputePipelineState(weighted ? kPFw[R]! : kPF[R]!)
       e.setBuffer(fin, offset: 0, index: 0); e.setBuffer(fout, offset: 0, index: 1); e.setBuffer(bTwfT, offset: 0, index: 2)
       e.setBuffer(wrF[A]!, offset: 0, index: 3); e.setBuffer(wRF[R]!, offset: 0, index: 4)
       e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 5); e.setBytes(&inv, length: 4, index: 6)
+      e.setBuffer(bDig, offset: 0, index: 7); e.setBuffer(bW, offset: 0, index: 8)
       e.dispatchThreadgroups(groups, threadsPerThreadgroup: threads)
     }
     if m31 {
-      e.setComputePipelineState(pass == 0 ? kPM[R]! : kPMi[R]!)
+      e.setComputePipelineState(weighted ? kPMw[R]! : pass == 0 ? kPM[R]! : kPMi[R]!)
       e.setBuffer(min_, offset: 0, index: 0); e.setBuffer(mout, offset: 0, index: 1); e.setBuffer(pass == 0 ? bTwmT : bTwmiT, offset: 0, index: 2)
       e.setBuffer(pass == 0 ? wrM[A]! : wrMi[A]!, offset: 0, index: 3); e.setBuffer(pass == 0 ? wRM[R]! : wRMi[R]!, offset: 0, index: 4)
       e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 5)
+      e.setBuffer(bDig, offset: 0, index: 6); e.setBuffer(bWexp, offset: 0, index: 7)
       e.dispatchThreadgroups(groups, threadsPerThreadgroup: threads)
     }
     return
@@ -193,14 +206,14 @@ func encodePass(_ e: MTLComputeCommandEncoder, _ R: Int, _ Ns: Int, _ pass: Int,
 func encodeSquaring(_ e: MTLComputeCommandEncoder) {
   e.setBuffer(bDig, offset: 0, index: 0); e.setBuffer(fA, offset: 0, index: 1); e.setBuffer(mA, offset: 0, index: 2)
   e.setBuffer(bW, offset: 0, index: 3); e.setBuffer(bWexp, offset: 0, index: 4)
-  grid(e, pack ? kW2 : kWeight, TN)
+  if !fuseWeight { grid(e, pack ? kW2 : kWeight, TN) }
   var fin = fA, fout = fB, min_ = mA, mout = mB
   for pass in 0..<2 {   // 0 forward, 1 inverse
     var inv: UInt32 = UInt32(pass)
     var Ns = 1
     if maxRadix > 2 {
-      for R in radices {
-        encodePass(e, R, Ns, pass, fin, fout, min_, mout)
+      for (ri, R) in radices.enumerated() {
+        encodePass(e, R, Ns, pass, fin, fout, min_, mout, weighted: fuseWeight && pass == 0 && ri == 0)
         swap(&fin, &fout); swap(&min_, &mout)
         Ns *= R
       }

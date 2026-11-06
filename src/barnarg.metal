@@ -27,6 +27,23 @@ inline float2 cmulf(float2 a, float2 b) {
   return float2(fma(a.x, b.x, -a.y * b.y), fma(a.x, b.y, a.y * b.x));
 }
 
+inline uint2 addc(uint2 a, uint2 b) { return uint2(addm(a.x, b.x), addm(a.y, b.y)); }
+inline uint2 subc(uint2 a, uint2 b) { return uint2(subm(a.x, b.x), subm(a.y, b.y)); }
+
+#define DFT16_BODY(DFT4, TW1, TW2, TW3, TW4, TW6, TW9) \
+  DFT4(v[0], v[4], v[8],  v[12]); DFT4(v[1], v[5], v[9],  v[13]); \
+  DFT4(v[2], v[6], v[10], v[14]); DFT4(v[3], v[7], v[11], v[15]); \
+  /* now v[4*m1 + k2] holds Y[m1][k2]; twiddle by W^(m1*k2) */ \
+  v[5] = TW1(v[5]); v[6] = TW2(v[6]); v[7] = TW3(v[7]); \
+  v[9] = TW2(v[9]); v[10] = TW4(v[10]); v[11] = TW6(v[11]); \
+  v[13] = TW3(v[13]); v[14] = TW6(v[14]); v[15] = TW9(v[15]); \
+  DFT4(v[0], v[1], v[2], v[3]); DFT4(v[4], v[5], v[6], v[7]); \
+  DFT4(v[8], v[9], v[10], v[11]); DFT4(v[12], v[13], v[14], v[15]); \
+  /* v[4*m1 + m2] holds X[m1 + 4*m2]; transpose to natural order */ \
+  { auto t = v[1]; v[1] = v[4]; v[4] = t; t = v[2]; v[2] = v[8]; v[8] = t; t = v[3]; v[3] = v[12]; v[12] = t; \
+    t = v[6]; v[6] = v[9]; v[9] = t; t = v[7]; v[7] = v[13]; v[13] = t; t = v[11]; v[11] = v[14]; v[14] = t; }
+
+
 struct Prm { uint N; uint Ns; uint B; uint logN; };
 
 // plain radix-2 path (--radix 2 --nopack). slow, but easy to check.
@@ -128,8 +145,38 @@ kernel void carry2(device int* dig [[buffer(0)]], device const long* cout [[buff
 // (exact on the M31 side; a few ulp on the FP32 side).
 // wr: R/2 roots of unity of order R (forward); inverse uses conj (FP) or a separate table (M31).
 
+inline void dft4f(thread float2& a, thread float2& b, thread float2& c, thread float2& d, uint inv) {
+  float2 t0 = a + c, t1 = a - c, t2 = b + d, u = b - d;
+  float2 t3 = inv ? float2(-u.y, u.x) : float2(u.y, -u.x);     // * W_4: -i forward, +i inverse
+  a = t0 + t2; c = t0 - t2; b = t1 + t3; d = t1 - t3;
+}
+inline void dft16f(thread float2* v, constant float2* wr, uint inv) {
+  float2 w1 = wr[1], w2 = wr[2], w3 = wr[3], w4 = wr[4], w6 = wr[6];
+  if (inv) { w1.y = -w1.y; w2.y = -w2.y; w3.y = -w3.y; w4.y = -w4.y; w6.y = -w6.y; }
+#define F_DFT4(a, b, c, d) dft4f(a, b, c, d, inv)
+#define F_TW1(x) cmulf(x, w1)
+#define F_TW2(x) cmulf(x, w2)
+#define F_TW3(x) cmulf(x, w3)
+#define F_TW4(x) cmulf(x, w4)
+#define F_TW6(x) cmulf(x, w6)
+#define F_TW9(x) (-cmulf(x, w1))
+  DFT16_BODY(F_DFT4, F_TW1, F_TW2, F_TW3, F_TW4, F_TW6, F_TW9)
+}
+
+inline void dft8f(thread float2* v, constant float2* wr, uint inv) {
+  float2 w1 = wr[1], w2 = wr[2], w3 = wr[3];
+  if (inv) { w1.y = -w1.y; w2.y = -w2.y; w3.y = -w3.y; }
+  dft4f(v[0], v[2], v[4], v[6], inv); dft4f(v[1], v[3], v[5], v[7], inv);
+  v[3] = cmulf(v[3], w1); v[5] = cmulf(v[5], w2); v[7] = cmulf(v[7], w3);
+  float2 t[8];
+  for (uint a = 0; a < 4; ++a) { t[a] = v[2 * a] + v[2 * a + 1]; t[a + 4] = v[2 * a] - v[2 * a + 1]; }
+  for (uint a = 0; a < 8; ++a) v[a] = t[a];
+}
+
 template <uint R>
 inline void dft_f(thread float2* v, constant float2* wr, uint inv) {
+  if (R == 16) { dft16f(v, wr, inv); return; }
+  if (R == 8) { dft8f(v, wr, inv); return; }
   float2 y[R];
   #pragma unroll
   for (uint ns = 1; ns < R; ns *= 2) {
@@ -158,8 +205,40 @@ template <bool INV> inline uint2 mul8(uint2 a, uint t) {   // a * W_8^t, t < 4
   return t == 0 ? a : t == 1 ? mulc<INV>(a) : t == 2 ? muli<INV>(a) : muli<INV>(mulc<INV>(a));
 }
 
+// hand-written length-16 dfts, 4 x 4: point k = 4*k1 + k2, output m = m1 + 4*m2.
+// the 4-point dfts need no multiplies (W_4 = +-i). of the 9 twiddles W_16^(m1*k2) between
+// the layers, 6 are 8th roots (rotations on the M31 side) and only W^1, W^3, W^9 multiply.
+template <bool INV> inline void dft4m(thread uint2& a, thread uint2& b, thread uint2& c, thread uint2& d) {
+  uint2 t0 = addc(a, c), t1 = subc(a, c), t2 = addc(b, d), t3 = muli<INV>(subc(b, d));
+  a = addc(t0, t2); c = subc(t0, t2); b = addc(t1, t3); d = subc(t1, t3);
+}
+inline uint2 negm(uint2 a) { return uint2(subm(0u, a.x), subm(0u, a.y)); }
+
+template <bool INV> inline void dft16m(thread uint2* v, constant uint2* wr) {
+  uint2 w1 = wr[1], w3 = wr[3];
+#define M_DFT4(a, b, c, d) dft4m<INV>(a, b, c, d)
+#define M_TW1(x) cmulm(x, w1)
+#define M_TW2(x) mul8<INV>(x, 1)
+#define M_TW3(x) cmulm(x, w3)
+#define M_TW4(x) mul8<INV>(x, 2)
+#define M_TW6(x) mul8<INV>(x, 3)
+#define M_TW9(x) negm(cmulm(x, w1))
+  DFT16_BODY(M_DFT4, M_TW1, M_TW2, M_TW3, M_TW4, M_TW6, M_TW9)
+}
+
+// length-8 dft as 4 x 2: point k = 2*k1 + k2. every twiddle is an 8th root, so no multiplies.
+template <bool INV> inline void dft8m(thread uint2* v) {
+  dft4m<INV>(v[0], v[2], v[4], v[6]); dft4m<INV>(v[1], v[3], v[5], v[7]);
+  v[3] = mul8<INV>(v[3], 1); v[5] = mul8<INV>(v[5], 2); v[7] = mul8<INV>(v[7], 3);
+  uint2 t[8];
+  for (uint a = 0; a < 4; ++a) { t[a] = addc(v[2 * a], v[2 * a + 1]); t[a + 4] = subc(v[2 * a], v[2 * a + 1]); }
+  for (uint a = 0; a < 8; ++a) v[a] = t[a];
+}
+
 template <uint R, bool INV>
 inline void dft_m(thread uint2* v, constant uint2* wr) {
+  if (R == 16) { dft16m<INV>(v, wr); return; }
+  if (R == 8) { dft8m<INV>(v); return; }
   uint2 y[R];
   #pragma unroll
   for (uint ns = 1; ns < R; ns *= 2) {
@@ -242,8 +321,6 @@ inline float2 conjf(float2 a) { return float2(a.x, -a.y); }
 inline float2 mul_i(float2 a) { return float2(-a.y, a.x); }
 inline float2 mul_mi(float2 a) { return float2(a.y, -a.x); }
 inline uint2 conjm(uint2 a) { return uint2(a.x, subm(0u, a.y)); }
-inline uint2 addc(uint2 a, uint2 b) { return uint2(addm(a.x, b.x), addm(a.y, b.y)); }
-inline uint2 subc(uint2 a, uint2 b) { return uint2(subm(a.x, b.x), subm(a.y, b.y)); }
 inline uint2 mul_im(uint2 a) { return uint2(subm(0u, a.y), a.x); }
 inline uint2 mul_mim(uint2 a) { return uint2(a.y, subm(0u, a.x)); }
 
@@ -370,10 +447,12 @@ kernel void carry1t(device const float2* fz [[buffer(0)]], device const uint2* m
 
 constant uint TJ = 8;
 
-template <uint A>
+// W = true: first forward pass reading the digits directly and weighting them (replaces weight2).
+template <uint A, bool W>
 kernel void passTf(device const float2* in [[buffer(0)]], device float2* out [[buffer(1)]],
                    device const float2* tw [[buffer(2)]], constant float2* wa [[buffer(3)]],
                    device const float2* wR [[buffer(4)]], constant Prm& q [[buffer(5)]], constant uint& inv [[buffer(6)]],
+                   device const int2* dig [[buffer(7)]], device const float2* wt [[buffer(8)]],
                    uint g [[threadgroup_position_in_grid]], uint l [[thread_position_in_threadgroup]]) {
   constexpr uint R = A * A, S = R + 1;
   threadgroup float2 sh[TJ * S];
@@ -382,8 +461,12 @@ kernel void passTf(device const float2* in [[buffer(0)]], device float2* out [[b
   uint j = g * TJ + i, m = j % Ns;
   float2 v[A];
   #pragma unroll
-  for (uint k1 = 0; k1 < A; ++k1) v[k1] = in[j + (A * k1 + c) * stride];
-  if (Ns > 1) {
+  for (uint k1 = 0; k1 < A; ++k1) {
+    uint n = j + (A * k1 + c) * stride;
+    if (W) { int2 d = dig[n]; v[k1] = float2(d) * wt[n]; }
+    else v[k1] = in[n];
+  }
+  if (!W && Ns > 1) {
     uint step = N / (Ns * R);
     float2 a = tw[m * c * step], b = tw[m * A * step];
     if (inv) { a.y = -a.y; b.y = -b.y; }
@@ -407,10 +490,11 @@ kernel void passTf(device const float2* in [[buffer(0)]], device float2* out [[b
   for (uint m2 = 0; m2 < A; ++m2) out[base + (c + A * m2) * Ns] = v[m2];
 }
 
-template <uint A, bool INV>
+template <uint A, bool INV, bool W>
 kernel void passTm(device const uint2* in [[buffer(0)]], device uint2* out [[buffer(1)]],
                    device const uint2* tw [[buffer(2)]], constant uint2* wa [[buffer(3)]],
                    device const uint2* wR [[buffer(4)]], constant Prm& q [[buffer(5)]],
+                   device const int2* dig [[buffer(6)]], device const uchar2* wexp [[buffer(7)]],
                    uint g [[threadgroup_position_in_grid]], uint l [[thread_position_in_threadgroup]]) {
   constexpr uint R = A * A, S = R + 1;
   threadgroup uint2 sh[TJ * S];
@@ -419,27 +503,46 @@ kernel void passTm(device const uint2* in [[buffer(0)]], device uint2* out [[buf
   uint j = g * TJ + i, m = j % Ns;
   uint2 v[A];
   #pragma unroll
-  for (uint k1 = 0; k1 < A; ++k1) v[k1] = in[j + (A * k1 + c) * stride];
-  if (Ns > 1 && m != 0) {
+  for (uint k1 = 0; k1 < A; ++k1) {
+    uint n = j + (A * k1 + c) * stride;
+    if (W) {
+      int2 d = dig[n]; uchar2 e = wexp[n];
+      uint u0 = d.x < 0 ? uint(d.x + int(P)) : uint(d.x), u1 = d.y < 0 ? uint(d.y + int(P)) : uint(d.y);
+      v[k1] = uint2(rot(u0, e.x), rot(u1, e.y));
+    } else v[k1] = in[n];
+  }
+  if (!W && Ns > 1 && m != 0) {
     uint step = N / (Ns * R);
     uint2 w = tw[m * c * step], b = tw[m * A * step];
     #pragma unroll
     for (uint k1 = 0; k1 < A; ++k1) { v[k1] = cmulm(v[k1], w); w = cmulm(w, b); }
   }
+#ifndef SKIP_DFT
   dft_m<A, INV>(v, wa);
+#endif
   #pragma unroll
+#ifdef SKIP_INNER
+  for (uint m1 = 0; m1 < A; ++m1) sh[i * S + m1 * A + c] = v[m1];
+#else
   for (uint m1 = 0; m1 < A; ++m1) sh[i * S + m1 * A + c] = (m1 * c) ? cmulm(v[m1], wR[m1 * c]) : v[m1];
+#endif
   threadgroup_barrier(mem_flags::mem_threadgroup);
   #pragma unroll
   for (uint k2 = 0; k2 < A; ++k2) v[k2] = sh[i * S + c * A + k2];
+#ifndef SKIP_DFT
   dft_m<A, INV>(v, wa);
+#endif
   uint base = (j / Ns) * Ns * R + m;
   #pragma unroll
   for (uint m2 = 0; m2 < A; ++m2) out[base + (c + A * m2) * Ns] = v[m2];
 }
 
+#define TF_ARGS device const float2*, device float2*, device const float2*, constant float2*, device const float2*, constant Prm&, constant uint&, device const int2*, device const float2*, uint, uint
+#define TM_ARGS device const uint2*, device uint2*, device const uint2*, constant uint2*, device const uint2*, constant Prm&, device const int2*, device const uchar2*, uint, uint
 #define INSTT(A) \
-  template [[host_name("passTf" #A)]] kernel void passTf<A>(device const float2*, device float2*, device const float2*, constant float2*, device const float2*, constant Prm&, constant uint&, uint, uint); \
-  template [[host_name("passTm" #A "f")]] kernel void passTm<A, false>(device const uint2*, device uint2*, device const uint2*, constant uint2*, device const uint2*, constant Prm&, uint, uint); \
-  template [[host_name("passTm" #A "i")]] kernel void passTm<A, true>(device const uint2*, device uint2*, device const uint2*, constant uint2*, device const uint2*, constant Prm&, uint, uint);
+  template [[host_name("passTf" #A)]] kernel void passTf<A, false>(TF_ARGS); \
+  template [[host_name("passTf" #A "w")]] kernel void passTf<A, true>(TF_ARGS); \
+  template [[host_name("passTm" #A "f")]] kernel void passTm<A, false, false>(TM_ARGS); \
+  template [[host_name("passTm" #A "i")]] kernel void passTm<A, true, false>(TM_ARGS); \
+  template [[host_name("passTm" #A "w")]] kernel void passTm<A, false, true>(TM_ARGS);
 INSTT(8) INSTT(16)
