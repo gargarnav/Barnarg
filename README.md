@@ -49,6 +49,7 @@ speed at M136279841 on an m4 macbook air (10 core gpu). whole numbers are big ju
 | 3 | hand-written 16 and 8 point dfts (4x4 and 4x2), weighting folded into the first pass | 16.0 |
 | 3.1 | last forward pass, tail and first inverse pass in one kernel; 2-multiply squaring in GF(M31^2) | 13.3 |
 | 3.2 | gerbicz-li checks (about 0.4% slower with the default settings) | 13.3 |
+| 3.3 | save files, so a long test can stop and resume | 13.3 |
 
 over an 80 second run (5500 squarings) barnarg holds 14.5 ms, about 69 iterations per second. prmers averages about 68 over the same length of run, and that includes its gerbicz checks. so they're level on this air. barnarg now has the same checks (below), which cost it about 0.4%.
 
@@ -86,12 +87,26 @@ defaults are L = 1000 and C = 400, so a check every 400,000 squarings (about 1.6
 # p=86243 N=4096 iters=86243  res64=0000000000000009  PRP  checks=19 failures=1
 ```
 
+## save files
+
+a checked run saves to `barnarg-<p>.save` every 10 minutes (`--save-every`, in seconds), after every check that passes, and when you press ctrl-c (it finishes the block it's on first). running the same command again picks up where it left off:
+
+```sh
+./build/barnarg 136279841 8388608 136279841 --gerbicz
+# ... ctrl-c
+# stopped at k=2000000, saved to barnarg-136279841.save
+./build/barnarg 136279841 8388608 136279841 --gerbicz
+# resuming from barnarg-136279841.save at k=2000000 (last verified k=1600000)
+```
+
+the file holds the current x and d and also the last verified pair, so an error that got in before a save still gets caught by the next check and rolled back. it ends with a 64-bit hash and is written to a `.tmp` file first and then renamed, so a crash mid-save can't leave a half-written file. a damaged file, or one for a different p or N, is ignored. at 8M words it's 134 mb. when a full test finishes, barnarg appends a line to `results.txt` and deletes the save file.
+
 the multiply (x times d, not a square) goes through the plain passes and a two-input version of the tail kernel, since it only runs once per 1000 squarings.
 
 next:
 
 - a cheaper M31 multiply (it's about 10 integer ops now, not just the 2 multiplies).
-- prp proofs, save files and autoprimenet.
+- prp proofs and autoprimenet.
 
 ## build and run
 

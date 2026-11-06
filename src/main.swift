@@ -45,6 +45,14 @@ func intFlag(_ name: String, _ def: Int?) -> Int? {
 }
 let gL = intFlag("--L", 1000)!, gC = intFlag("--C", 400)!
 let injectAt = intFlag("--inject", nil)   // add 1 to a digit of x once at this iteration (tests the check)
+let saveEvery = intFlag("--save-every", 600)!   // seconds between save files
+var savePathFlag: String? = nil
+if let k = args.firstIndex(of: "--save") { savePathFlag = args[k + 1]; args.removeSubrange(k...(k + 1)) }
+let noSave = args.contains("--nosave"); args.removeAll { $0 == "--nosave" }
+// ctrl-c or kill: finish the current block, save, exit
+var stopRequested: sig_atomic_t = 0
+signal(SIGINT) { _ in stopRequested = 1 }
+signal(SIGTERM) { _ in stopRequested = 1 }
 guard args.count >= 3, let p = Int(args[0]), let N = Int(args[1]), let iters = Int(args[2]) else {
   print("usage: barnarg_gpu P N ITERS [dumpfile k1,k2,...]"); exit(2)
 }
@@ -468,6 +476,59 @@ if gerbicz {
     savedD.withUnsafeBytes { _ = memcpy(bD.contents(), $0.baseAddress!, N * 4) }
     return savedK
   }
+  // save file: "BARNARG1", then p, N, k, verified k as u64, then x, d, verified x, verified d
+  // (N x i32 each), then a 64-bit hash of everything before it. written to .tmp and renamed.
+  let savePath = savePathFlag ?? "barnarg-\(p).save"
+  func hash64(_ data: Data) -> UInt64 {
+    var h: UInt64 = 0xcbf29ce484222325
+    data.withUnsafeBytes { raw in
+      let w = raw.bindMemory(to: UInt64.self)
+      for x in w { h = (h ^ x) &* 0x100000001b3; h ^= h >> 29 }
+      for b in raw.suffix(raw.count % 8) { h = (h ^ UInt64(b)) &* 0x100000001b3 }
+    }
+    return h
+  }
+  func writeSave(_ k: Int) {
+    if noSave { return }
+    var data = Data("BARNARG1".utf8)
+    var hdr: [UInt64] = [UInt64(p), UInt64(N), UInt64(k), UInt64(savedK)]
+    data.append(Data(bytes: &hdr, count: 32))
+    data.append(Data(bytes: bDig.contents(), count: N * 4))
+    data.append(Data(bytes: bD.contents(), count: N * 4))
+    savedX.withUnsafeBytes { data.append(Data($0)) }
+    savedD.withUnsafeBytes { data.append(Data($0)) }
+    var h = hash64(data)
+    data.append(Data(bytes: &h, count: 8))
+    let tmp = savePath + ".tmp"
+    do {
+      try data.write(to: URL(fileURLWithPath: tmp))
+      _ = try? FileManager.default.removeItem(atPath: savePath)
+      try FileManager.default.moveItem(atPath: tmp, toPath: savePath)
+    } catch { print("could not write \(savePath): \(error)") }
+  }
+  func loadSave() -> Int? {
+    guard let data = FileManager.default.contents(atPath: savePath) else { return nil }
+    let want = 8 + 32 + 4 * N * 4 + 8
+    guard data.count == want, data.prefix(8) == Data("BARNARG1".utf8) else {
+      print("\(savePath) is not a barnarg save file for this size, ignoring it"); return nil
+    }
+    let body = data.prefix(want - 8)
+    let stored = data.suffix(8).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }
+    guard hash64(Data(body)) == stored else { print("\(savePath) is damaged (hash mismatch), ignoring it"); return nil }
+    let hdr = data.subdata(in: 8..<40).withUnsafeBytes { Array($0.bindMemory(to: UInt64.self)) }
+    guard hdr[0] == UInt64(p), hdr[1] == UInt64(N) else { print("\(savePath) is for p=\(hdr[0]) N=\(hdr[1]), ignoring it"); return nil }
+    let off = 40, sz = N * 4
+    data.withUnsafeBytes { raw in
+      memcpy(bDig.contents(), raw.baseAddress! + off, sz)
+      memcpy(bD.contents(), raw.baseAddress! + off + sz, sz)
+      savedX.withUnsafeMutableBytes { _ = memcpy($0.baseAddress!, raw.baseAddress! + off + 2 * sz, sz) }
+      savedD.withUnsafeMutableBytes { _ = memcpy($0.baseAddress!, raw.baseAddress! + off + 3 * sz, sz) }
+    }
+    if Int(hdr[2]) > iters { print("\(savePath) is already past \(iters) squarings (k=\(hdr[2])), ignoring it"); return nil }
+    savedK = Int(hdr[3])
+    return Int(hdr[2])
+  }
+
   var gpu = 0.0
   func run(_ body: (MTLComputeCommandEncoder) -> Void) {
     let cb = q.makeCommandBuffer()!, e = cb.makeComputeCommandEncoder()!
@@ -484,7 +545,13 @@ if gerbicz {
     }
   }
   save(0)
-  var k = 0, checks = 0, failures = 0, injected = false
+  var k = 0, checks = 0, failures = 0, injected = false, resumedAt = 0
+  if let rk = loadSave() {
+    k = rk
+    resumedAt = rk
+    print("resuming from \(savePath) at k=\(k) (last verified k=\(savedK))")
+  }
+  var lastSave = Date()
   let kFull = iters / L * L
   let start = Date()
   while k < kFull {
@@ -503,8 +570,9 @@ if gerbicz {
       checks += 1
       if sameValue(bT, bD) {
         save(k)
+        writeSave(k); lastSave = Date()
         let el = Date().timeIntervalSince(start)
-        print(String(format: "k=%d  check ok  res64=%016llx  %.1f iter/s", k, res64(bDig), Double(k) / el))
+        print(String(format: "k=%d  check ok  res64=%016llx  %.1f iter/s", k, res64(bDig), Double(k - resumedAt) / el))
       } else {
         failures += 1
         let bad = k
@@ -512,8 +580,11 @@ if gerbicz {
         print("k=\(bad)  gerbicz check FAILED, going back to k=\(k)")
       }
     }
+    if stopRequested != 0 { writeSave(k); print("stopped at k=\(k), saved to \(savePath)"); exit(0) }
+    if Date().timeIntervalSince(lastSave) >= Double(saveEvery) { writeSave(k); lastSave = Date() }
   }
   let r = iters - kFull
+  if stopRequested != 0 { writeSave(k); print("stopped at k=\(k), saved to \(savePath)"); exit(0) }
   if r > 0 {
     while true {
       copyDigits(bT, bDig)
@@ -534,7 +605,14 @@ if gerbicz {
   let isPRP = rv == 9 && (hash61(bDig) == 9 || (hash61(bDig) + mpMod61) % q61 == 9)
   let el = Date().timeIntervalSince(start)
   print(String(format: "p=%d N=%d iters=%d  res64=%016llx  %@  checks=%d failures=%d  roundoff=%.4f  %.1f iter/s (wall, checks included)",
-               p, N, iters, rv, iters == p ? (isPRP ? "PRP" : "not PRP") : "", checks, failures, Float(bitPattern: st[0]), Double(iters) / el))
+               p, N, iters, rv, iters == p ? (isPRP ? "PRP" : "not PRP") : "", checks, failures, Float(bitPattern: st[0]), Double(iters - resumedAt) / el))
+  if iters == p && failures == 0 || iters == p && injectAt != nil {
+    let line = String(format: "%@  M%d  %@  res64=%016llx  N=%d  checks=%d  failures=%d\n",
+                      ISO8601DateFormatter().string(from: Date()), p, isPRP ? "PRP" : "not PRP", rv, N, checks, failures)
+    if let fh = FileHandle(forWritingAtPath: "results.txt") { fh.seekToEndOfFile(); fh.write(Data(line.utf8)); fh.closeFile() }
+    else { FileManager.default.createFile(atPath: "results.txt", contents: Data(line.utf8)) }
+    _ = try? FileManager.default.removeItem(atPath: savePath)
+  }
   if let dp = dumpPath {
     FileManager.default.createFile(atPath: dp, contents: nil)
     let d = FileHandle(forWritingAtPath: dp)!

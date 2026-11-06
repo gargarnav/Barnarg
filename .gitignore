@@ -2,3 +2,6 @@ build/
 __pycache__/
 *.bin
 .DS_Store
+*.save
+*.save.tmp
+results.txt
