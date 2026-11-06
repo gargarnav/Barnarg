@@ -1,0 +1,303 @@
+[
+ {
+  "p": 521,
+  "mersenne_prime": true,
+  "prp": true,
+  "res64_at": {
+   "521": "0000000000000009"
+  },
+  "type1_res64": "0000000000000001"
+ },
+ {
+  "p": 523,
+  "mersenne_prime": false,
+  "prp": false,
+  "res64_at": {
+   "523": "91980a0be8acb775"
+  },
+  "type1_res64": "d749c83a364c1462"
+ },
+ {
+  "p": 607,
+  "mersenne_prime": true,
+  "prp": true,
+  "res64_at": {
+   "607": "0000000000000009"
+  },
+  "type1_res64": "0000000000000001"
+ },
+ {
+  "p": 1277,
+  "mersenne_prime": false,
+  "prp": false,
+  "res64_at": {
+   "1000": "36f834f2d5842cf5",
+   "1277": "42d83c4febe2bc55"
+  },
+  "type1_res64": "076d5c08e15214ed"
+ },
+ {
+  "p": 1279,
+  "mersenne_prime": true,
+  "prp": true,
+  "res64_at": {
+   "1000": "9fa3aa9c95a7609a",
+   "1279": "0000000000000009"
+  },
+  "type1_res64": "0000000000000001"
+ },
+ {
+  "p": 2203,
+  "mersenne_prime": true,
+  "prp": true,
+  "res64_at": {
+   "1000": "16b1658f1b06998a",
+   "2203": "0000000000000009"
+  },
+  "type1_res64": "0000000000000001"
+ },
+ {
+  "p": 2207,
+  "mersenne_prime": false,
+  "prp": false,
+  "res64_at": {
+   "1000": "5547cc0ee96f869b",
+   "2207": "77b1494ea5c03b6f"
+  },
+  "type1_res64": "62a1ebb367c0069a"
+ },
+ {
+  "p": 2281,
+  "mersenne_prime": true,
+  "prp": true,
+  "res64_at": {
+   "1000": "3172bb71d82845b7",
+   "2281": "0000000000000009"
+  },
+  "type1_res64": "0000000000000001"
+ },
+ {
+  "p": 3217,
+  "mersenne_prime": true,
+  "prp": true,
+  "res64_at": {
+   "1000": "70406c9c1e8b333e",
+   "3217": "0000000000000009"
+  },
+  "type1_res64": "0000000000000001"
+ },
+ {
+  "p": 4253,
+  "mersenne_prime": true,
+  "prp": true,
+  "res64_at": {
+   "1000": "85d7bb9658351e3c",
+   "4253": "0000000000000009"
+  },
+  "type1_res64": "0000000000000001"
+ },
+ {
+  "p": 4421,
+  "mersenne_prime": false,
+  "prp": false,
+  "res64_at": {
+   "1000": "9c3429b3cfcb042a",
+   "4421": "5744b0a7ca957270"
+  },
+  "type1_res64": "b45cf72f1682620c"
+ },
+ {
+  "p": 4423,
+  "mersenne_prime": true,
+  "prp": true,
+  "res64_at": {
+   "1000": "f21fa83851d0de95",
+   "4423": "0000000000000009"
+  },
+  "type1_res64": "0000000000000001"
+ },
+ {
+  "p": 9689,
+  "mersenne_prime": true,
+  "prp": true,
+  "res64_at": {
+   "1000": "cbd946e15a343e1a",
+   "9689": "0000000000000009"
+  },
+  "type1_res64": "0000000000000001"
+ },
+ {
+  "p": 9941,
+  "mersenne_prime": true,
+  "prp": true,
+  "res64_at": {
+   "1000": "f58b351fc459d867",
+   "9941": "0000000000000009"
+  },
+  "type1_res64": "0000000000000001"
+ },
+ {
+  "p": 9973,
+  "mersenne_prime": false,
+  "prp": false,
+  "res64_at": {
+   "1000": "ba054f1db98df840",
+   "9973": "ee3d6f2394a3ce43"
+  },
+  "type1_res64": "36ea61ae9ebcde07"
+ },
+ {
+  "p": 11213,
+  "mersenne_prime": true,
+  "prp": true,
+  "res64_at": {
+   "1000": "fba631fbcb73a011",
+   "10000": "0a4aaf339c8b290c",
+   "11213": "0000000000000009"
+  },
+  "type1_res64": "0000000000000001"
+ },
+ {
+  "p": 19927,
+  "mersenne_prime": false,
+  "prp": false,
+  "res64_at": {
+   "1000": "bfa4e5413f1407c0",
+   "10000": "38b155806fe8d002",
+   "19927": "a39558077e2a261c"
+  },
+  "type1_res64": "4b109800d52120ad"
+ },
+ {
+  "p": 19937,
+  "mersenne_prime": true,
+  "prp": true,
+  "res64_at": {
+   "1000": "8df1a6ccc5a4dbd2",
+   "10000": "6248f957ba3ee3c5",
+   "19937": "0000000000000009"
+  },
+  "type1_res64": "0000000000000001"
+ },
+ {
+  "p": 21701,
+  "mersenne_prime": true,
+  "prp": true,
+  "res64_at": {
+   "1000": "2f2ef42ee9413524",
+   "10000": "f93836e36bdcda4b",
+   "21701": "0000000000000009"
+  },
+  "type1_res64": "0000000000000001"
+ },
+ {
+  "p": 23209,
+  "mersenne_prime": true,
+  "prp": true,
+  "res64_at": {
+   "1000": "6f2ae6fe66030653",
+   "10000": "f5035cb202b85ea9",
+   "23209": "0000000000000009"
+  },
+  "type1_res64": "0000000000000001"
+ },
+ {
+  "p": 44483,
+  "mersenne_prime": false,
+  "prp": false,
+  "res64_at": {
+   "1000": "27316a84f573b1e7",
+   "10000": "adf4f09d63a3d8fc",
+   "44483": "1e81c52f43555063"
+  },
+  "type1_res64": "752add05405ed00b"
+ },
+ {
+  "p": 44497,
+  "mersenne_prime": true,
+  "prp": true,
+  "res64_at": {
+   "1000": "658934300b5d0adc",
+   "10000": "d45f9720e7aa56ae",
+   "44497": "0000000000000009"
+  },
+  "type1_res64": "0000000000000001"
+ },
+ {
+  "p": 86243,
+  "mersenne_prime": true,
+  "prp": true,
+  "res64_at": {
+   "1000": "e52db002b73401a8",
+   "10000": "679c496ea22ca731",
+   "86243": "0000000000000009"
+  },
+  "type1_res64": "0000000000000001"
+ },
+ {
+  "p": 86249,
+  "mersenne_prime": false,
+  "prp": false,
+  "res64_at": {
+   "1000": "f69a27cd963e3782",
+   "10000": "8a110eca7ec88bde",
+   "86249": "062d6633d5052b5f"
+  },
+  "type1_res64": "56050b5b17ab3db5"
+ },
+ {
+  "p": 110501,
+  "mersenne_prime": false,
+  "prp": false,
+  "res64_at": {
+   "1000": "1f3fb614421083c5",
+   "10000": "d42185f0006e9ee4",
+   "110501": "a028fed423854c23"
+  },
+  "type1_res64": "bc76553403f25dcb"
+ },
+ {
+  "p": 110503,
+  "mersenne_prime": true,
+  "prp": true,
+  "res64_at": {
+   "1000": "fcb94aeacb288862",
+   "10000": "f184a4f69ee1b58c",
+   "110503": "0000000000000009"
+  },
+  "type1_res64": "0000000000000001"
+ },
+ {
+  "p": 132049,
+  "mersenne_prime": true,
+  "prp": true,
+  "res64_at": {
+   "1000": "0eebcb2adb224dac",
+   "10000": "6e85ca1c52071d1f",
+   "132049": "0000000000000009"
+  },
+  "type1_res64": "0000000000000001"
+ },
+ {
+  "p": 216091,
+  "mersenne_prime": true,
+  "prp": true,
+  "res64_at": {
+   "1000": "28d01226b9466041",
+   "10000": "af5d61f334cd65d7",
+   "216091": "0000000000000009"
+  },
+  "type1_res64": "0000000000000001"
+ },
+ {
+  "p": 216103,
+  "mersenne_prime": false,
+  "prp": false,
+  "res64_at": {
+   "1000": "4845c15a359412b2",
+   "10000": "4d92521f33c0e7fd",
+   "216103": "2141ccb9527da79f"
+  },
+  "type1_res64": "3c9588865e7fbd4a"
+ }
+]
