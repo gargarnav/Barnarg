@@ -1,6 +1,6 @@
-build/barnarg: src/main.swift src/proof.swift src/results.swift
+build/barnarg: src/main.swift src/proof.swift src/results.swift src/ll.swift
 	mkdir -p build
-	swiftc -O src/main.swift src/proof.swift src/results.swift -o build/barnarg
+	swiftc -O src/main.swift src/proof.swift src/results.swift src/ll.swift -o build/barnarg
 
 check: build/barnarg
 	./build/barnarg 521 64 521 build/m521.bin 1,2,10,521
@@ -14,6 +14,9 @@ check: build/barnarg
 	cd build && ./barnarg 86243 4096 86243 --gerbicz --L 100 --C 50 --proof 5 --nosave | grep -E "PRP|wrote"
 	test "$$(md5 -q build/proof/86243-5.proof)" = 60b69c35a3d3403c2173ba598ba0f243
 	./build/barnarg verify build/proof/86243-5.proof 4096
+	./build/barnarg 86243 4096 86241 --ll --jacobi-every 0 --nosave | grep "LL  res64=0000000000000000  PRIME"
+	./build/barnarg 86249 8192 86247 --ll --jacobi-every 0 --nosave | grep "res64=422c56c4f9e3f2e3  composite"
+	./build/barnarg 86249 8192 86247 --ll --jacobi-every 0 --nosave --inject 20000 | grep -E "FAILED|res64=422c56c4f9e3f2e3  composite"
 
 clean:
 	rm -rf build

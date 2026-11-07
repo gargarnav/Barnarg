@@ -130,9 +130,10 @@ kernel void carry1(device const float2* fz [[buffer(0)]], device const uint2* mz
 
 kernel void carry2(device int* dig [[buffer(0)]], device const long* cout [[buffer(1)]],
                    device const uchar* width [[buffer(2)]], device atomic_uint* stat [[buffer(3)]],
-                   constant Prm& q [[buffer(4)]], uint t [[thread_position_in_grid]]) {
+                   constant Prm& q [[buffer(4)]], constant int& sub [[buffer(5)]], uint t [[thread_position_in_grid]]) {
   uint nb = q.N / q.B;
   long c = cout[(t + nb - 1) % nb];      // block 0 takes the wrap carry (2^p = 1 mod M_p)
+  if (t == 0) c -= sub;                  // lucas-lehmer: s^2 - 2
   for (uint i = 0; i < q.B && c != 0; ++i) {
     uint j = t * q.B + i;
     long z = long(dig[j]) + c;

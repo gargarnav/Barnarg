@@ -2,7 +2,8 @@
 // Usage: barnarg P N ITERS [dumpfile k1,k2,...] [--kernels path]
 //        barnarg P N P --gerbicz [--proof POWER]     a full checked prp, with a proof
 //        barnarg verify FILE N                       check a proof file
-//        barnarg [work] [--fft N] [--proof POWER]    run the PRP= lines in worktodo.txt
+//        barnarg P N P-2 --ll                        a full lucas-lehmer test, with jacobi checks
+//        barnarg [work] [--fft N] [--proof POWER]    run the PRP=, Test= and DoubleCheck= lines in worktodo.txt
 // Dump format: per checkpoint, u32 k, u32 N, then N x i32 balanced digits.
 // Prints the round-off (max |q - round(q)|, must stay < 0.5), error counters and us/iter.
 import Foundation
@@ -30,6 +31,7 @@ func rootOfUnity(_ N: Int) -> (UInt64, UInt64) {
   fatalError("no generator")
 }
 
+setvbuf(stdout, nil, _IOLBF, 0)   // line by line, so a log file or nohup.out keeps up
 var args = CommandLine.arguments.dropFirst().map { $0 }
 // barnarg [work] [flags]: take the first assignment in worktodo.txt, run it as a checked prp
 // with a proof, write the json result to results.txt, take the line out and start the next one.
@@ -37,12 +39,12 @@ let worktodoPath = "worktodo.txt"
 var assignment: Assignment? = nil
 if args.first.map({ Int($0) == nil && $0 != "verify" }) ?? true {
   if args.first == "work" { args.removeFirst() }
-  guard let a = nextAssignment(worktodoPath) else { print("no prp work in \(worktodoPath)"); exit(0) }
+  guard let a = nextAssignment(worktodoPath) else { print("no prp or ll work in \(worktodoPath)"); exit(0) }
   assignment = a
   var n = chooseN(a.p)
   if let k = args.firstIndex(of: "--fft"), k + 1 < args.count, let v = Int(args[k + 1]) { n = v; args.removeSubrange(k...(k + 1)) }
-  print("M\(a.p) from \(worktodoPath)\(a.aid.map { ", assignment \($0)" } ?? ""), fft \(n)")
-  args = [String(a.p), String(n), String(a.p), "--gerbicz"] + args
+  print("M\(a.p) \(a.ll ? "LL" : "PRP") from \(worktodoPath)\(a.aid.map { ", assignment \($0)" } ?? ""), fft \(n)")
+  args = (a.ll ? [String(a.p), String(n), String(a.p - 2), "--ll"] : [String(a.p), String(n), String(a.p), "--gerbicz"]) + args
 }
 var kernelPath = "src/barnarg.metal"   // from the repo, or next to build/ when run from elsewhere
 if !FileManager.default.fileExists(atPath: kernelPath) {
@@ -59,6 +61,9 @@ args.removeAll { $0 == "--profile" }
 let noMidFlag = args.contains("--nomid"); args.removeAll { $0 == "--nomid" }
 // --gerbicz: run ITERS squarings with gerbicz-li checks (block L, check every C blocks)
 let gerbicz = args.contains("--gerbicz"); args.removeAll { $0 == "--gerbicz" }
+// --ll: lucas-lehmer instead of prp (start at 4, subtract 2 after each squaring). with ITERS = P - 2
+// it is a full test with jacobi checks every --jacobi-every seconds; otherwise a plain run for dumps.
+let llMode = args.contains("--ll"); args.removeAll { $0 == "--ll" }
 func intFlag(_ name: String, _ def: Int?) -> Int? {
   guard let k = args.firstIndex(of: name) else { return def }
   let v = Int(args[k + 1]); args.removeSubrange(k...(k + 1)); return v
@@ -66,6 +71,7 @@ func intFlag(_ name: String, _ def: Int?) -> Int? {
 let gL = intFlag("--L", 1000)!, gC = intFlag("--C", 400)!
 let injectAt = intFlag("--inject", nil)   // add 1 to a digit of x once at this iteration (tests the check)
 let saveEvery = intFlag("--save-every", 600)!   // seconds between save files
+let jacobiEvery = intFlag("--jacobi-every", 1800)!   // ll: seconds between jacobi checks
 var savePathFlag: String? = nil
 if let k = args.firstIndex(of: "--save") { savePathFlag = args[k + 1]; args.removeSubrange(k...(k + 1)) }
 let noSave = args.contains("--nosave"); args.removeAll { $0 == "--nosave" }
@@ -152,8 +158,10 @@ let bStat = dev.makeBuffer(length: 16, options: .storageModeShared)!
 memset(bStat.contents(), 0, 16)
 let dig = bDig.contents().bindMemory(to: Int32.self, capacity: N)
 for j in 0..<N { dig[j] = 0 }
-dig[0] = 3
+dig[0] = llMode ? 4 : 3
 let q = dev.makeCommandQueue()!
+var llSub: Int32 = llMode ? 2 : 0   // subtracted after each squaring in encodeSquaring
+var noSub: Int32 = 0
 
 // radix plan: 16, 16, ..., then whatever power of 2 is left
 if maxRadix <= 2 { pack = false }
@@ -340,6 +348,7 @@ func encodeSquaring(_ e: MTLComputeCommandEncoder) {
   } else { grid(e, pack ? kC1P : kC1, N / B) }
   e.setBuffer(curDig, offset: 0, index: 0); e.setBuffer(bCout, offset: 0, index: 1); e.setBuffer(bWidth, offset: 0, index: 2)
   e.setBuffer(bStat, offset: 0, index: 3); e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 4)
+  e.setBytes(&llSub, length: 4, index: 5)
   grid(e, kC2, N / B)
 }
 
@@ -355,6 +364,7 @@ func encodeCarry(_ e: MTLComputeCommandEncoder, _ fin: MTLBuffer, _ min_: MTLBuf
   } else { grid(e, kC1P, N / B) }
   e.setBuffer(curDig, offset: 0, index: 0); e.setBuffer(bCout, offset: 0, index: 1); e.setBuffer(bWidth, offset: 0, index: 2)
   e.setBuffer(bStat, offset: 0, index: 3); e.setBytes(&prm, length: MemoryLayout<Prm>.size, index: 4)
+  e.setBytes(&noSub, length: 4, index: 5)
   grid(e, kC2, N / B)
 }
 
@@ -470,7 +480,8 @@ if profileMode {
       } else { grid(e, kC1P, N / B) } }
     timeIt("carry2", Double(N) * 4) { e in
       e.setBuffer(bDig, offset: 0, index: 0); e.setBuffer(bCout, offset: 0, index: 1); e.setBuffer(bWidth, offset: 0, index: 2)
-      e.setBuffer(bStat, offset: 0, index: 3); e.setBytes(&prmN, length: MemoryLayout<Prm>.size, index: 4); grid(e, kC2, N / B) }
+      e.setBuffer(bStat, offset: 0, index: 3); e.setBytes(&prmN, length: MemoryLayout<Prm>.size, index: 4)
+      e.setBytes(&noSub, length: 4, index: 5); grid(e, kC2, N / B) }
   }
   if fuseMid {
     timeIt("mid fp32", nb) { e in encodeMid(e, fA, fB, mA, mB, m31: false) }
@@ -583,6 +594,112 @@ if let vf = verifyFile {
   print(String(format: "%@: M%d power %d, res64 %016llx, %@ (%.1f s)", vf.path, p, vf.middles.count, r,
                ok ? "proof ok" : "proof BAD", Date().timeIntervalSince(t)))
   exit(ok ? 0 : 1)
+}
+
+// after a finished assignment: take the line out and start again on the next one
+func nextWork() -> Never {
+  if let a = assignment {
+    removeLine(worktodoPath, a.line)
+    if stopRequested == 0 {
+      fflush(stdout)
+      let argv = CommandLine.arguments.map { strdup($0) } + [nil]
+      execvp(CommandLine.arguments[0], argv)
+      print("could not restart: \(String(cString: strerror(errno)))"); exit(1)
+    }
+  }
+  exit(0)
+}
+
+// ---- lucas-lehmer with jacobi checks ----
+// s_k is checked every jacobiEvery seconds and at the end. a failed check goes back to the last
+// s_k that passed. the save file keeps both: "BARNARL1", p, N, k, good k as u64, then s_k and
+// the good s (N x i32 each), then a 64-bit hash. written to .tmp and renamed.
+if llMode && iters == p - 2 {
+  guard let gmp = GMP() else { print("the ll test needs gmp for its jacobi check: brew install gmp"); exit(2) }
+  var good = [Int32](repeating: 0, count: N), goodK = 0
+  good[0] = 4
+  func keepGood(_ k: Int) { good.withUnsafeMutableBytes { _ = memcpy($0.baseAddress!, bDig.contents(), N * 4) }; goodK = k }
+  func backToGood() -> Int { good.withUnsafeBytes { _ = memcpy(bDig.contents(), $0.baseAddress!, N * 4) }; return goodK }
+  let savePath = savePathFlag ?? "barnarg-\(p).ll.save"
+  func writeSave(_ k: Int) {
+    if noSave { return }
+    var data = Data("BARNARL1".utf8)
+    var hdr: [UInt64] = [UInt64(p), UInt64(N), UInt64(k), UInt64(goodK)]
+    data.append(Data(bytes: &hdr, count: 32))
+    data.append(Data(bytes: bDig.contents(), count: N * 4))
+    good.withUnsafeBytes { data.append(Data($0)) }
+    var h = hash64(data)
+    data.append(Data(bytes: &h, count: 8))
+    let tmp = savePath + ".tmp"
+    do {
+      try data.write(to: URL(fileURLWithPath: tmp))
+      _ = try? FileManager.default.removeItem(atPath: savePath)
+      try FileManager.default.moveItem(atPath: tmp, toPath: savePath)
+    } catch { print("could not write \(savePath): \(error)") }
+  }
+  func loadSave() -> Int? {
+    guard let data = FileManager.default.contents(atPath: savePath) else { return nil }
+    let want = 8 + 32 + 2 * N * 4 + 8
+    guard data.count == want, data.prefix(8) == Data("BARNARL1".utf8) else {
+      print("\(savePath) is not a barnarg ll save file for this size, ignoring it"); return nil
+    }
+    let stored = data.suffix(8).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }
+    guard hash64(Data(data.prefix(want - 8))) == stored else { print("\(savePath) is damaged (hash mismatch), ignoring it"); return nil }
+    let hdr = data.subdata(in: 8..<40).withUnsafeBytes { Array($0.bindMemory(to: UInt64.self)) }
+    guard hdr[0] == UInt64(p), hdr[1] == UInt64(N), Int(hdr[2]) <= iters else {
+      print("\(savePath) is for p=\(hdr[0]) N=\(hdr[1]) k=\(hdr[2]), ignoring it"); return nil
+    }
+    data.withUnsafeBytes { raw in
+      memcpy(bDig.contents(), raw.baseAddress! + 40, N * 4)
+      good.withUnsafeMutableBytes { _ = memcpy($0.baseAddress!, raw.baseAddress! + 40 + N * 4, N * 4) }
+    }
+    goodK = Int(hdr[3])
+    return Int(hdr[2])
+  }
+
+  var k = 0, checks = 0, failures = 0, failsHere = 0, injected = false, resumedAt = 0
+  if let rk = loadSave() { k = rk; resumedAt = rk; print("resuming from \(savePath) at k=\(k) (last checked k=\(goodK))") }
+  let start = Date()
+  var lastCheck = Date(), lastSave = Date()
+  while k < iters {
+    let n = min(1000, iters - k)
+    square(bDig, n); k += n
+    if let at = injectAt, !injected, k >= at {
+      bDig.contents().bindMemory(to: Int32.self, capacity: N)[1] += 1
+      injected = true
+      print("injected an error into s at iteration \(k)")
+    }
+    if k == iters || Date().timeIntervalSince(lastCheck) >= Double(jacobiEvery) {
+      let tj = Date()
+      let ok = gmp.llJacobi(toWords(bDig), p) == -1
+      checks += 1; lastCheck = Date()
+      if ok {
+        keepGood(k); failsHere = 0
+        writeSave(k); lastSave = Date()
+        let el = Date().timeIntervalSince(start)
+        print(String(format: "k=%d  jacobi ok (%.1f s)  res64=%016llx  %.1f iter/s", k, Date().timeIntervalSince(tj), res64(bDig),
+                     Double(k - resumedAt) / el))
+      } else {
+        failures += 1; failsHere += 1
+        let bad = k
+        k = backToGood()
+        print("k=\(bad)  jacobi check FAILED, going back to k=\(k)")
+        if failsHere >= 3 { print("3 failures in a row from k=\(k), stopping so it can be looked at"); writeSave(k); exit(3) }
+      }
+    }
+    if stopRequested != 0 { writeSave(k); print("stopped at k=\(k)\(noSave ? "" : ", saved to \(savePath)")"); exit(0) }
+    if Date().timeIntervalSince(lastSave) >= Double(saveEvery) { writeSave(k); lastSave = Date() }
+  }
+  let s = toWords(bDig)
+  let st = bStat.contents().bindMemory(to: UInt32.self, capacity: 4)
+  let (line, prime) = llResultJSON(p: p, s: s, N: N, jacobiErrors: failures, aid: assignment?.aid)
+  print(String(format: "p=%d N=%d LL  res64=%016llx  %@  checks=%d failures=%d  roundoff=%.4f  %.1f iter/s (wall, checks included)",
+               p, N, UInt64(s[0]) | UInt64(s.count > 1 ? s[1] : 0) << 32, prime ? "PRIME" : "composite", checks, failures,
+               Float(bitPattern: st[0]), Double(iters - resumedAt) / Date().timeIntervalSince(start)))
+  appendLine("results.txt", line)
+  print("M\(p) is \(prime ? "prime (lucas-lehmer)" : "composite"), result written to results.txt")
+  _ = try? FileManager.default.removeItem(atPath: savePath)
+  nextWork()
 }
 
 // ---- PRP with gerbicz-li checks ----
@@ -707,11 +824,11 @@ if gerbicz {
         print("k=\(bad)  gerbicz check FAILED, going back to k=\(k)")
       }
     }
-    if stopRequested != 0 { writeSave(k); print("stopped at k=\(k), saved to \(savePath)"); exit(0) }
+    if stopRequested != 0 { writeSave(k); print("stopped at k=\(k)\(noSave ? "" : ", saved to \(savePath)")"); exit(0) }
     if Date().timeIntervalSince(lastSave) >= Double(saveEvery) { writeSave(k); lastSave = Date() }
   }
   let r = iters - kFull
-  if stopRequested != 0 { writeSave(k); print("stopped at k=\(k), saved to \(savePath)"); exit(0) }
+  if stopRequested != 0 { writeSave(k); print("stopped at k=\(k)\(noSave ? "" : ", saved to \(savePath)")"); exit(0) }
   if r > 0 {
     while true {
       copyDigits(bT, bDig)

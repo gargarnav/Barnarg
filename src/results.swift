@@ -6,7 +6,7 @@
 import CryptoKit
 import Foundation
 
-let barnargVersion = "3.6"
+let barnargVersion = "3.7"
 
 // v / 9 mod 2^p - 1, v given as ceil(p/32) words in [0, 2^p - 2]
 func divideBy9(_ v: [UInt32], _ p: Int) -> [UInt32] {
@@ -74,17 +74,23 @@ func appendLine(_ path: String, _ line: String) {
 // ---- worktodo.txt ----
 // PRP=AID,k,b,n,c[,how far factored,tests saved[,base,residue type]][,"known factors"]
 // (and PRPDC= for a double check). barnarg does k = 1, b = 2, c = -1, base 3, no known factors.
-struct Assignment { var line: String; var aid: String?; var p: Int }
+// Test=AID,p,how far factored,p-1 done (and DoubleCheck=) is a lucas-lehmer test.
+struct Assignment { var line: String; var aid: String?; var p: Int; var ll = false }
 
 func nextAssignment(_ path: String) -> Assignment? {
   guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
   for raw in text.split(whereSeparator: \.isNewline) {
     let line = String(raw).trimmingCharacters(in: .whitespaces)
-    guard line.hasPrefix("PRP=") || line.hasPrefix("PRPDC=") else { continue }
+    let ll = line.hasPrefix("Test=") || line.hasPrefix("DoubleCheck=")
+    guard ll || line.hasPrefix("PRP=") || line.hasPrefix("PRPDC=") else { continue }
     var f = line.split(separator: "=", maxSplits: 1)[1].split(separator: ",", omittingEmptySubsequences: false).map(String.init)
     var aid: String? = nil
-    if let first = f.first, first == "N/A" || (first.count == 32 && first.allSatisfy(\.isHexDigit)) {
-      aid = first == "N/A" ? nil : first; f.removeFirst()
+    if let first = f.first, first == "N/A" || first == "0" && f.count > 1 && ll || (first.count == 32 && first.allSatisfy(\.isHexDigit)) {
+      aid = first.count == 32 ? first : nil; f.removeFirst()
+    }
+    if ll {
+      guard let p = f.first.flatMap({ Int($0) }), p > 2 else { print("skipping \(line): no exponent"); continue }
+      return Assignment(line: line, aid: aid, p: p, ll: true)
     }
     guard f.count >= 4, f[0] == "1", f[1] == "2", let p = Int(f[2]), f[3] == "-1" else {
       print("skipping \(line): barnarg only does 2^p - 1"); continue

@@ -1,6 +1,6 @@
 # barnarg
 
-a mersenne prp tester for the gpu in apple silicon macs, written in metal.
+a mersenne prime tester (prp and lucas-lehmer) for the gpu in apple silicon macs, written in metal.
 
 the name is a cross of two old english apples, barnack beauty and margil (b**arn**ack, m**arg**il).
 
@@ -36,6 +36,9 @@ works, and about 1.2 times faster than prmers on an m4 air. every result so far 
 | M86249, full prp | 4096 | not prp, res64 `062d6633d5052b5f` |
 | M216091, full prp | 16384 | prp (a known mersenne prime) |
 | M136279841, 60 squarings | 8M | matches gmp, round-off 0.012 |
+| M86243, M110503, M132049, M216091, full ll | 4096 to 16384 | prime (known mersenne primes) |
+| M86249, M132059, full ll | 8192 | composite, res64 matches gmp |
+| M136279841, 40 ll iterations | 8M | matches gmp |
 
 speed at M136279841 on an m4 macbook air (10 core gpu). whole numbers are big jumps (about 1.4x or more), decimals are smaller steps:
 
@@ -53,6 +56,7 @@ speed at M136279841 on an m4 macbook air (10 core gpu). whole numbers are big ju
 | 3.4 | prp proofs, the same files gpuowl and prmers make | 13.3 |
 | 3.5 | cheaper M31 add, subtract and multiply (one `min` instead of a full reduction) | 11.2 |
 | 3.6 | worktodo.txt and json results, for autoprimenet | 11.2 |
+| 3.7 | lucas-lehmer tests with jacobi checks | 11.2 |
 
 the air has no fan, so a long run is slower than these numbers. over 5000 squarings (about a minute, starting cool) 3.4 held 13.8 to 13.9 ms and 3.5 held 12.1 to 12.4 ms, about 81 iterations per second (two runs each, alternating, 2 minutes apart). prmers averaged about 68 over a run that long, including its gerbicz checks, so barnarg is now about 1.2 times faster than it on this mac. the checks cost barnarg about 0.4%.
 
@@ -71,6 +75,8 @@ where the time goes now (`--profile`, 11.2 ms total):
 - the carry, 2.0 ms.
 
 i tried folding the carry into the last inverse pass: the M31 kernel did its last 256 point pass, read the fp32 result, did the crt and carried each 16 digit block in threadgroup memory. it was correct but not faster. 13.7 ms against 13.2 without it, and 14.3 when i also staged the digit stores. my guess is the extra threadgroup memory leaves too few groups per core to hide the memory latency. the separate carry kernel stays for now.
+
+a second try (branch `fused-carry`) did the last two inverse passes, the crt and the carry in one kernel, and added each block's carry-out in the next squaring's first pass. that one was correct and took 11.03 ms against 11.2. the crt is mostly 64-bit integer work, which apple gpus don't have in hardware, and in the separate kernel it was hidden behind memory waits anyway. 1.5% wasn't worth the extra code, so it stays on the branch.
 
 ## gerbicz checks
 
@@ -128,9 +134,25 @@ the file is gpuowl's version 2 format, the one primenet takes. i used the same p
 
 at M136279841 power 8 keeps 256 residues of 17 mb, about 4.4 gb of disk until the proof is written. building the proof takes roughly 40,000 squarings' worth of work, and checking it 532,000 squarings (about 2 hours here), about 1% on top of the 19 days a test now takes. `--proof N` changes the power, `--proof 0` turns it off.
 
+## lucas-lehmer
+
+s_0 = 4, s_(k+1) = s_k^2 - 2, and 2^p - 1 is prime exactly when s_(p-2) = 0. the squaring is the same as for prp; the - 2 goes into the carry kernel, as an extra carry into digit 0. ll is mostly used for double checks of old ll results now, since new tests are prp with proofs.
+
+there's no gerbicz check for ll. the check is the jacobi symbol: (s_k - 2 / 2^p - 1) = -1 for every k >= 1, prime or not. a wrong s_k fails it about half the time, so it catches half the errors, same as in prime95 and gpuowl. barnarg checks every 30 minutes (`--jacobi-every`, in seconds) and at the end, and goes back to the last s_k that passed. at M136279841 one check takes about 20 s with gmp, under 1.2% of the run.
+
+```sh
+./build/barnarg 86249 8192 86247 --ll --inject 20000 --jacobi-every 0
+# injected an error into s at iteration 20000
+# k=20000  jacobi check FAILED, going back to k=19000
+# ...
+# p=86249 N=8192 LL  res64=422c56c4f9e3f2e3  composite  checks=88 failures=1
+```
+
+the save file is `barnarg-<p>.ll.save`, with the current s and the last one that passed. the result line has `"worktype":"LL"`, the res64 of s_(p-2), `"errors":{"jacobi":n}` and `"shift-count":0`.
+
 ## gimps work
 
-run `barnarg` with no exponent and it works through `worktodo.txt` in the current folder, the same file prime95 and the gpu programs use. it takes the first `PRP=` (or `PRPDC=`) line for 2^p - 1, picks the fft size, runs a checked prp with a proof, writes the result and takes the line out. then it starts again on the next line. ctrl-c stops it, and running `barnarg` again resumes from the save file.
+run `barnarg` with no exponent and it works through `worktodo.txt` in the current folder, the same file prime95 and the gpu programs use. it takes the first `PRP=` (or `PRPDC=`) line for 2^p - 1, or `Test=` / `DoubleCheck=` for a lucas-lehmer test, picks the fft size, runs a checked prp with a proof (or a checked ll), writes the result and takes the line out. then it starts again on the next line. ctrl-c stops it, and running `barnarg` again resumes from the save file.
 
 ```sh
 cat worktodo.txt
@@ -154,7 +176,7 @@ the residue is type 1, 3^(2^p - 2), so a prime gives 1. barnarg computes 3^(2^p)
 
 the fft size is the smallest power of 2 under about 18 bits per word at 4M, less 0.25 per doubling, which leaves some room under the limit from `research/fp32_model.py`. `--fft N` overrides it. M136279841 gets 8M.
 
-autoprimenet (by teal dulcet and daniel connelly) fetches the assignments, reports the results and uploads the proofs. it doesn't know barnarg, but barnarg uses the same files as prmers (`worktodo.txt`, `results.txt`, `proof/`), so its `--prmers` mode should work, except for the progress reports, which read prmers's own save files. i haven't run it against primenet yet, and whether primenet gives credit for a new program is up to george woltman.
+autoprimenet (by teal dulcet and daniel connelly) fetches the assignments, reports the results and uploads the proofs. it doesn't know barnarg, but barnarg uses the same files as prmers (`worktodo.txt`, `results.txt`, `proof/`), so its `--prmers` mode should work, except for the progress reports, which read prmers's own save files. i haven't run it against primenet yet. george woltman said on 8 nov 2026 that proof files that verify are enough for him, and the server side is being checked with sample results.
 
 skipped for now: known-factor (cofactor) tests, other bases and residue types, and certification work.
 
@@ -164,7 +186,7 @@ next:
 
 ## build and run
 
-needs xcode (for swiftc and metal) and, for the checks, python with numpy and gmpy2.
+needs xcode (for swiftc and metal). lucas-lehmer tests also need gmp (`brew install gmp`) for the jacobi check; prp doesn't. the checks need python with numpy and gmpy2.
 
 ```sh
 make
@@ -184,6 +206,7 @@ arguments are `p N iterations [dumpfile k1,k2,...]`, plus `--gerbicz` for a chec
 - `src/main.swift`: host side, tables and the iteration loop.
 - `src/proof.swift`: sha3, proof points, residue and proof files.
 - `src/results.swift`: the json results line, worktodo.txt, fft size.
+- `src/ll.swift`: the jacobi check (through gmp) and the ll results line.
 - `ref/proof_ref.py`: proofs in gmpy2 (`make` and `verify`).
 - `ref/barnarg_ref.py`: the same algorithm in numpy, slow but simple.
 - `ref/ref_vectors.json`: gmp residues for 19 mersenne primes and 10 composites.
