@@ -28,7 +28,7 @@ at an 8M fft the fp32 side carries about 18.4 bits per word, the same as fp64 on
 
 ## status
 
-works, and level with prmers on speed. every result so far matches gmp.
+works, and about 1.2 times faster than prmers on an m4 air. every result so far matches gmp.
 
 | test | fft | result |
 |---|---|---|
@@ -51,8 +51,11 @@ speed at M136279841 on an m4 macbook air (10 core gpu). whole numbers are big ju
 | 3.2 | gerbicz-li checks (about 0.4% slower with the default settings) | 13.3 |
 | 3.3 | save files, so a long test can stop and resume | 13.3 |
 | 3.4 | prp proofs, the same files gpuowl and prmers make | 13.3 |
+| 3.5 | cheaper M31 add, subtract and multiply (one `min` instead of a full reduction) | 11.2 |
 
-over an 80 second run (5500 squarings) barnarg holds 14.5 ms, about 69 iterations per second. prmers averages about 68 over the same length of run, and that includes its gerbicz checks. so they're level on this air. barnarg now has the same checks (below), which cost it about 0.4%.
+the air has no fan, so a long run is slower than these numbers. over 5000 squarings (about a minute, starting cool) 3.4 held 13.8 to 13.9 ms and 3.5 held 12.1 to 12.4 ms, about 81 iterations per second (two runs each, alternating, 2 minutes apart). prmers averaged about 68 over a run that long, including its gerbicz checks, so barnarg is now about 1.2 times faster than it on this mac. the checks cost barnarg about 0.4%.
+
+the M31 change: every value stays in [0, P), so a + b and a - b + P are both under 2P, and one conditional subtract is enough. `min(x, x - P)` does that in 2 instructions, since x - P wraps to something huge when x < P. the multiply works the same way if you multiply by 2b instead of b: a * 2b = hi * 2^32 + lo, so a * b = hi + lo / 2 mod P, and both halves are already under P. that's 7 instructions instead of 12. on its own the cheaper multiply was only 12% faster in `research/mulbench.swift`, because the adds and subtracts around it cost as much. with both, a GF(M31^2) product went from 30 to 47 billion a second.
 
 the 8th roots trick: the host picks the roots of unity so that W_8 = 2^15 (1 + i). that works because (2^15 (1 + i))^2 = 2^31 i = i. multiplying by any 8th root is then an add, a subtract and a 15-bit rotation, so radix-8 butterflies on the M31 side need no multiplies at all.
 
@@ -60,10 +63,10 @@ the biggest single jump (24.5 to 16 ms) came from writing the 16 point dft out b
 
 the middle kernel works because of where things land. with the plan 256 x 256 x 64, the last forward pass leaves instance j holding Z[j + 65536 m]. the tail pairs k with M - k, which is in instance 65536 - j. so one threadgroup takes 4 instances and their 4 partners, finishes the forward dft, squares, and then runs the first inverse pass too, since an inverse plan that starts with 64 reads exactly those same 64 values. j = 0 and j = 32768 are their own partners.
 
-where the time goes now (`--profile`, 13.3 ms total):
+where the time goes now (`--profile`, 11.2 ms total):
 
-- 4 ordinary passes each way, 0.74 to 1.07 ms each.
-- the middle kernel, 1.25 ms fp32 and 2.05 ms M31. the M31 one is limited by multiplies: the tail does 4M x 5 complex products, which matches the measured 72.7 billion modular multiplies a second.
+- 4 ordinary passes each way, 0.75 to 1.07 ms each. the M31 ones now move 84 to 89 gb/s, against 98 for a plain copy, so they're close to memory bound.
+- the middle kernel, 1.20 ms fp32 and 1.32 ms M31 (2.05 before 3.5).
 - the carry, 2.0 ms.
 
 i tried folding the carry into the last inverse pass: the M31 kernel did its last 256 point pass, read the fp32 result, did the crt and carried each 16 digit block in threadgroup memory. it was correct but not faster. 13.7 ms against 13.2 without it, and 14.3 when i also staged the digit stores. my guess is the extra threadgroup memory leaves too few groups per core to hide the memory latency. the separate carry kernel stays for now.
@@ -122,11 +125,10 @@ a full checked run (`--gerbicz` with ITERS = p) does this by default with power 
 
 the file is gpuowl's version 2 format, the one primenet takes. i used the same points and the same folding order as gpuowl, so the file depends only on the number, not on the program. for M86243 at power 5, barnarg's proof is byte for byte the same as the one prmers writes (md5 `60b69c35a3d3403c2173ba598ba0f243`), and `make check` tests for that. `ref/proof_ref.py` does the same thing in gmpy2. it gave identical files for M86243, M86249 and M216091 (that one stopped with ctrl-c halfway and resumed), and it verified the M1257787 power 8 proof.
 
-at M136279841 power 8 keeps 256 residues of 17 mb, about 4.4 gb of disk until the proof is written. building the proof takes roughly 40,000 squarings' worth of work, and checking it 532,000 squarings (about 2 hours here), about 1% on top of the 22 days. `--proof N` changes the power, `--proof 0` turns it off.
+at M136279841 power 8 keeps 256 residues of 17 mb, about 4.4 gb of disk until the proof is written. building the proof takes roughly 40,000 squarings' worth of work, and checking it 532,000 squarings (about 2 hours here), about 1% on top of the 19 days a test now takes. `--proof N` changes the power, `--proof 0` turns it off.
 
 next:
 
-- a cheaper M31 multiply (it's about 10 integer ops now, not just the 2 multiplies).
 - autoprimenet and the json results line.
 
 ## build and run

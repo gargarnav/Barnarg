@@ -8,21 +8,25 @@ using namespace metal;
 
 constant uint P = 0x7fffffffu;   // M31 = 2^31 - 1
 
-inline uint red(uint x) { x = (x & P) + (x >> 31); return x >= P ? x - P : x; }
-inline uint addm(uint a, uint b) { return red(a + b); }
-inline uint subm(uint a, uint b) { return red(a + P - b); }
-inline uint mulm(uint a, uint b) {          // a, b < P; product < 2^62
-  uint lo = a * b, hi = mulhi(a, b);
-  return red((lo & P) + ((lo >> 31) | (hi << 1)));
+inline uint red(uint x) { x = (x & P) + (x >> 31); return x >= P ? x - P : x; }   // any 32-bit x
+// everything below takes and returns values in [0, P). then a + b and a - b + P are under 2P,
+// so one conditional subtract is enough, and min does it (if x < P, x - P wraps and is bigger).
+inline uint addm(uint a, uint b) { uint x = a + b; return min(x, x - P); }
+inline uint subm(uint a, uint b) { uint x = a - b; return min(x, x + P); }
+inline uint mulm(uint a, uint b) {
+  // a * 2b = hi * 2^32 + lo, so a * b = hi * 2^31 + lo / 2 = hi + lo / 2 mod P.
+  // hi < P and lo / 2 <= P, so the sum is under 2P.
+  uint b2 = b << 1, x = mulhi(a, b2) + ((a * b2) >> 1);
+  return min(x, x - P);
 }
 inline uint2 cmulm(uint2 a, uint2 b) {      // GF(M31^2), i^2 = -1; 3 multiplies (Karatsuba)
   uint ac = mulm(a.x, b.x), bd = mulm(a.y, b.y);
-  uint s = mulm(red(a.x + a.y), red(b.x + b.y));
+  uint s = mulm(addm(a.x, a.y), addm(b.x, b.y));
   return uint2(subm(ac, bd), subm(s, addm(ac, bd)));
 }
 inline uint2 csqm(uint2 a) {                 // a^2 in GF(M31^2) with 2 multiplies: (x+y)(x-y) + 2xy i
   uint t = mulm(a.x, a.y);
-  return uint2(mulm(red(a.x + a.y), subm(a.x, a.y)), addm(t, t));
+  return uint2(mulm(addm(a.x, a.y), subm(a.x, a.y)), addm(t, t));
 }
 inline uint rot(uint x, uint e) {           // x * 2^e mod M31, x < P, e < 31
   return e == 0 ? x : (((x << e) & P) | (x >> (31 - e)));
