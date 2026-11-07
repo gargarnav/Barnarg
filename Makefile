@@ -2,12 +2,20 @@ PREFIX ?= /usr/local
 SRC = src/main.swift src/proof.swift src/results.swift src/ll.swift
 
 build/barnarg: $(SRC) build/kernels.swift
-	swiftc -O $(SRC) build/kernels.swift -o build/barnarg
+	swiftc -O -target arm64-apple-macos13.0 $(SRC) build/kernels.swift -o build/barnarg
 
 # the metal source goes into the binary as a string, so build/barnarg works from any folder
 build/kernels.swift: src/barnarg.metal
 	mkdir -p build
 	{ printf 'let embeddedKernels = #"""\n'; cat src/barnarg.metal; printf '\n"""#\n'; } > $@
+
+# the zip for a github release: the binary, readme and license
+VERSION = $(shell sed -n 's/.*barnargVersion = "\(.*\)".*/\1/p' src/results.swift)
+dist: build/barnarg
+	rm -rf build/dist && mkdir -p build/dist/barnarg-$(VERSION)
+	cp build/barnarg README.md LICENSE build/dist/barnarg-$(VERSION)/
+	cd build/dist && zip -qr barnarg-$(VERSION)-macos-arm64.zip barnarg-$(VERSION)
+	shasum -a 256 build/dist/barnarg-$(VERSION)-macos-arm64.zip
 
 install: build/barnarg
 	mkdir -p $(PREFIX)/bin
@@ -32,4 +40,4 @@ check: build/barnarg
 clean:
 	rm -rf build
 
-.PHONY: check clean install
+.PHONY: check clean install dist

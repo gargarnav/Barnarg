@@ -184,6 +184,18 @@ next:
 
 - run a real assignment through autoprimenet.
 
+## download
+
+the [releases page](https://github.com/gargarnav/Barnarg/releases) has a zip with the binary (apple silicon, macos 13 or later). the gpu kernels are inside the binary, so it's the only file you need. it isn't signed by apple, so macos blocks it the first time if it came through a browser. this takes the block off:
+
+```sh
+unzip barnarg-3.7-macos-arm64.zip && cd barnarg-3.7
+xattr -d com.apple.quarantine barnarg
+./barnarg 86243 4096 86243 --gerbicz --proof 0     # about 10 s: "M86243 is a probable prime"
+```
+
+lucas-lehmer tests also need gmp (`brew install gmp`).
+
 ## build and run
 
 needs an apple silicon mac (m1 or later) and swiftc, which comes with xcode or just the command line tools (`xcode-select --install`). the kernels are compiled by metal at run time, so there's no separate shader build. lucas-lehmer tests also need gmp (`brew install gmp`) for the jacobi check; prp doesn't. the tests need python with numpy and gmpy2 (`pip install -r requirements.txt`).
@@ -194,6 +206,7 @@ i've only run it on an m4 macbook air so far, so results from other chips would 
 git clone https://github.com/gargarnav/Barnarg.git && cd Barnarg
 make
 make install            # copies build/barnarg to /usr/local/bin, or PREFIX=~/.local
+make dist               # the release zip, in build/dist/
 ./build/barnarg 86243 4096 86243 build/m86243.bin 1000,86243
 python3 test/check.py build/m86243.bin 86243
 # ok  k=   1000 value matches GMP  res64=e52db002b73401a8
