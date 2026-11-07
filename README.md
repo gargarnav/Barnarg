@@ -216,3 +216,7 @@ arguments are `p N iterations [dumpfile k1,k2,...]`, plus `--gerbicz` for a chec
 - `ref/ref_vectors.json`: gmp residues for 19 mersenne primes and 10 composites.
 - `test/`: checkers for gpu dumps.
 - `research/`: the bandwidth benchmark, the threadgroup handoff test and the fp32 error model.
+
+## license
+
+gpl-3.0, see `LICENSE`. copyright 2026 arnav garg.
