@@ -1,6 +1,6 @@
-build/barnarg: src/main.swift src/proof.swift
+build/barnarg: src/main.swift src/proof.swift src/results.swift
 	mkdir -p build
-	swiftc -O src/main.swift src/proof.swift -o build/barnarg
+	swiftc -O src/main.swift src/proof.swift src/results.swift -o build/barnarg
 
 check: build/barnarg
 	./build/barnarg 521 64 521 build/m521.bin 1,2,10,521
@@ -12,8 +12,8 @@ check: build/barnarg
 	./build/barnarg 86243 4096 86243 --gerbicz --L 100 --C 50 --proof 0 | tail -1
 	./build/barnarg 86243 4096 86243 --gerbicz --L 100 --C 50 --proof 0 --inject 30000 | grep -E "FAILED|PRP"
 	cd build && ./barnarg 86243 4096 86243 --gerbicz --L 100 --C 50 --proof 5 --nosave | grep -E "PRP|wrote"
-	test "$$(md5 -q build/86243-5.proof)" = 60b69c35a3d3403c2173ba598ba0f243
-	./build/barnarg verify build/86243-5.proof 4096
+	test "$$(md5 -q build/proof/86243-5.proof)" = 60b69c35a3d3403c2173ba598ba0f243
+	./build/barnarg verify build/proof/86243-5.proof 4096
 
 clean:
 	rm -rf build

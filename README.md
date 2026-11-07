@@ -52,6 +52,7 @@ speed at M136279841 on an m4 macbook air (10 core gpu). whole numbers are big ju
 | 3.3 | save files, so a long test can stop and resume | 13.3 |
 | 3.4 | prp proofs, the same files gpuowl and prmers make | 13.3 |
 | 3.5 | cheaper M31 add, subtract and multiply (one `min` instead of a full reduction) | 11.2 |
+| 3.6 | worktodo.txt and json results, for autoprimenet | 11.2 |
 
 the air has no fan, so a long run is slower than these numbers. over 5000 squarings (about a minute, starting cool) 3.4 held 13.8 to 13.9 ms and 3.5 held 12.1 to 12.4 ms, about 81 iterations per second (two runs each, alternating, 2 minutes apart). prmers averaged about 68 over a run that long, including its gerbicz checks, so barnarg is now about 1.2 times faster than it on this mac. the checks cost barnarg about 0.4%.
 
@@ -103,7 +104,7 @@ a checked run saves to `barnarg-<p>.save` every 10 minutes (`--save-every`, in s
 # resuming from barnarg-136279841.save at k=2000000 (last verified k=1600000)
 ```
 
-the file holds the current x and d and also the last verified pair, so an error that got in before a save still gets caught by the next check and rolled back. it ends with a 64-bit hash and is written to a `.tmp` file first and then renamed, so a crash mid-save can't leave a half-written file. a damaged file, or one for a different p or N, is ignored. at 8M words it's 134 mb. when a full test finishes, barnarg appends a line to `results.txt` and deletes the save file.
+the file holds the current x and d and also the last verified pair, so an error that got in before a save still gets caught by the next check and rolled back. it ends with a 64-bit hash and is written to a `.tmp` file first and then renamed, so a crash mid-save can't leave a half-written file. a damaged file, or one for a different p or N, is ignored. at 8M words it's 134 mb. when a full test finishes, barnarg writes the result to `results.txt` (below) and deletes the save file.
 
 the multiply (x times d, not a square) goes through the plain passes and a two-input version of the tail kernel, since it only runs once per 1000 squarings.
 
@@ -111,25 +112,55 @@ the multiply (x times d, not a square) goes through the plain passes and a two-i
 
 gimps wants a proof with every first-time prp test, so the server can check the result without anyone running the whole test again. it's pietrzak's verifiable delay function: the run keeps x_k at 2^power points, and afterwards they get folded into `power` middle values, with exponents taken from a sha3-256 hash chain. checking the proof then takes about p / 2^power squarings instead of p.
 
-a full checked run (`--gerbicz` with ITERS = p) does this by default with power 8. the residues go into `barnarg-<p>-proof/` as they're reached. if a gerbicz check fails later, the rollback goes back before them and they get written again. at the end barnarg builds the proof, checks it itself and writes `<p>-<power>.proof`:
+a full checked run (`--gerbicz` with ITERS = p) does this by default with power 8. the residues go into `barnarg-<p>-proof/` as they're reached. if a gerbicz check fails later, the rollback goes back before them and they get written again. at the end barnarg builds the proof, checks it itself and writes `proof/<p>-<power>.proof`:
 
 ```sh
 ./build/barnarg 86243 4096 86243 --gerbicz --L 100 --C 50 --proof 5
 # proof level 0: middle res64 adabb277f01dcae0, h 56d222f32855a5d7
 # ...
 # checking the proof: 2696 squarings
-# wrote 86243-5.proof and checked it (0.6 s)
-./build/barnarg verify 86243-5.proof 4096
-# 86243-5.proof: M86243 power 5, res64 0000000000000009, proof ok (0.3 s)
+# wrote proof/86243-5.proof and checked it (0.6 s)
+./build/barnarg verify proof/86243-5.proof 4096
+# proof/86243-5.proof: M86243 power 5, res64 0000000000000009, proof ok (0.3 s)
 ```
 
 the file is gpuowl's version 2 format, the one primenet takes. i used the same points and the same folding order as gpuowl, so the file depends only on the number, not on the program. for M86243 at power 5, barnarg's proof is byte for byte the same as the one prmers writes (md5 `60b69c35a3d3403c2173ba598ba0f243`), and `make check` tests for that. `ref/proof_ref.py` does the same thing in gmpy2. it gave identical files for M86243, M86249 and M216091 (that one stopped with ctrl-c halfway and resumed), and it verified the M1257787 power 8 proof.
 
 at M136279841 power 8 keeps 256 residues of 17 mb, about 4.4 gb of disk until the proof is written. building the proof takes roughly 40,000 squarings' worth of work, and checking it 532,000 squarings (about 2 hours here), about 1% on top of the 19 days a test now takes. `--proof N` changes the power, `--proof 0` turns it off.
 
+## gimps work
+
+run `barnarg` with no exponent and it works through `worktodo.txt` in the current folder, the same file prime95 and the gpu programs use. it takes the first `PRP=` (or `PRPDC=`) line for 2^p - 1, picks the fft size, runs a checked prp with a proof, writes the result and takes the line out. then it starts again on the next line. ctrl-c stops it, and running `barnarg` again resumes from the save file.
+
+```sh
+cat worktodo.txt
+# PRP=0123456789ABCDEF0123456789ABCDEF,1,2,86249,-1,75,0,3,1
+barnarg --proof 4
+# M86249 from worktodo.txt, assignment 0123456789ABCDEF0123456789ABCDEF, fft 8192
+# ...
+# wrote proof/86249-4.proof and checked it (0.7 s)
+# M86249 is composite, result written to results.txt
+```
+
+the result is one json line in `results.txt`, in the format prime95, gpuowl and prmers use:
+
+```
+{"status":"C","exponent":86249,"worktype":"PRP-3","res64":"56050B5B17AB3DB5","res2048":"6309...3db5","residue-type":1,
+ "errors":{"gerbicz":0},"shift-count":0,"fft-length":8192,"proof":{"version":2,"power":4,"hashsize":64,"md5":"277e80b2..."},
+ "program":{"name":"barnarg","version":"3.6"},...,"checksum":{"version":1,"checksum":"6D2C9BBF"}}
+```
+
+the residue is type 1, 3^(2^p - 2), so a prime gives 1. barnarg computes 3^(2^p), so it divides by 9 first (exactly, on the cpu). for M86249 the res64, res2048 and proof md5 are the same as prmers gives. the checksum is a crc32 over the fields joined by `;`, and the same code gives prmers's checksum for its own line.
+
+the fft size is the smallest power of 2 under about 18 bits per word at 4M, less 0.25 per doubling, which leaves some room under the limit from `research/fp32_model.py`. `--fft N` overrides it. M136279841 gets 8M.
+
+autoprimenet (by teal dulcet and daniel connelly) fetches the assignments, reports the results and uploads the proofs. it doesn't know barnarg, but barnarg uses the same files as prmers (`worktodo.txt`, `results.txt`, `proof/`), so its `--prmers` mode should work, except for the progress reports, which read prmers's own save files. i haven't run it against primenet yet, and whether primenet gives credit for a new program is up to george woltman.
+
+skipped for now: known-factor (cofactor) tests, other bases and residue types, and certification work.
+
 next:
 
-- autoprimenet and the json results line.
+- run a real assignment through autoprimenet.
 
 ## build and run
 
@@ -152,6 +183,7 @@ arguments are `p N iterations [dumpfile k1,k2,...]`, plus `--gerbicz` for a chec
 - `src/barnarg.metal`: the gpu kernels.
 - `src/main.swift`: host side, tables and the iteration loop.
 - `src/proof.swift`: sha3, proof points, residue and proof files.
+- `src/results.swift`: the json results line, worktodo.txt, fft size.
 - `ref/proof_ref.py`: proofs in gmpy2 (`make` and `verify`).
 - `ref/barnarg_ref.py`: the same algorithm in numpy, slow but simple.
 - `ref/ref_vectors.json`: gmp residues for 19 mersenne primes and 10 composites.

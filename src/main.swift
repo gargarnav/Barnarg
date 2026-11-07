@@ -2,6 +2,7 @@
 // Usage: barnarg P N ITERS [dumpfile k1,k2,...] [--kernels path]
 //        barnarg P N P --gerbicz [--proof POWER]     a full checked prp, with a proof
 //        barnarg verify FILE N                       check a proof file
+//        barnarg [work] [--fft N] [--proof POWER]    run the PRP= lines in worktodo.txt
 // Dump format: per checkpoint, u32 k, u32 N, then N x i32 balanced digits.
 // Prints the round-off (max |q - round(q)|, must stay < 0.5), error counters and us/iter.
 import Foundation
@@ -30,6 +31,19 @@ func rootOfUnity(_ N: Int) -> (UInt64, UInt64) {
 }
 
 var args = CommandLine.arguments.dropFirst().map { $0 }
+// barnarg [work] [flags]: take the first assignment in worktodo.txt, run it as a checked prp
+// with a proof, write the json result to results.txt, take the line out and start the next one.
+let worktodoPath = "worktodo.txt"
+var assignment: Assignment? = nil
+if args.first.map({ Int($0) == nil && $0 != "verify" }) ?? true {
+  if args.first == "work" { args.removeFirst() }
+  guard let a = nextAssignment(worktodoPath) else { print("no prp work in \(worktodoPath)"); exit(0) }
+  assignment = a
+  var n = chooseN(a.p)
+  if let k = args.firstIndex(of: "--fft"), k + 1 < args.count, let v = Int(args[k + 1]) { n = v; args.removeSubrange(k...(k + 1)) }
+  print("M\(a.p) from \(worktodoPath)\(a.aid.map { ", assignment \($0)" } ?? ""), fft \(n)")
+  args = [String(a.p), String(n), String(a.p), "--gerbicz"] + args
+}
 var kernelPath = "src/barnarg.metal"   // from the repo, or next to build/ when run from elsewhere
 if !FileManager.default.fileExists(atPath: kernelPath) {
   kernelPath = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
@@ -719,16 +733,18 @@ if gerbicz {
   let el = Date().timeIntervalSince(start)
   print(String(format: "p=%d N=%d iters=%d  res64=%016llx  %@  checks=%d failures=%d  roundoff=%.4f  %.1f iter/s (wall, checks included)",
                p, N, iters, rv, iters == p ? (isPRP ? "PRP" : "not PRP") : "", checks, failures, Float(bitPattern: st[0]), Double(iters - resumedAt) / el))
-  var proofNote = ""
+  // the proof goes in proof/, where autoprimenet looks for it
+  var proofInfo: (Int, String)? = nil
   if wantProof {
     keep(p, bDig)
     let tp = Date()
-    let proofPath = "\(p)-\(proofPower).proof"
+    try? FileManager.default.createDirectory(atPath: "proof", withIntermediateDirectories: true)
+    let proofPath = "proof/\(p)-\(proofPower).proof"
     if let pr = buildProof(proofPower) {
       if verifyProof(pr.B, pr.middles) {
         do {
           try writeProof(proofPath, p, pr.B, pr.middles)
-          proofNote = "  proof=\(proofPath)"
+          proofInfo = (proofPower, md5Hex(proofPath)!)
           _ = try? FileManager.default.removeItem(atPath: proofDir)
           print(String(format: "wrote %@ and checked it (%.1f s)", proofPath, Date().timeIntervalSince(tp)))
         } catch { print("could not write \(proofPath): \(error)") }
@@ -736,14 +752,26 @@ if gerbicz {
         print("the proof did not check out, keeping \(proofDir) so it can be made again")
       }
     }
-    if proofNote.isEmpty { failures += 1 }
   }
-  if iters == p && failures == 0 || iters == p && injectAt != nil {
-    let line = String(format: "%@  M%d  %@  res64=%016llx  N=%d  checks=%d  failures=%d%@\n",
-                      ISO8601DateFormatter().string(from: Date()), p, isPRP ? "PRP" : "not PRP", rv, N, checks, failures, proofNote)
-    if let fh = FileHandle(forWritingAtPath: "results.txt") { fh.seekToEndOfFile(); fh.write(Data(line.utf8)); fh.closeFile() }
-    else { FileManager.default.createFile(atPath: "results.txt", contents: Data(line.utf8)) }
+  if iters == p {
+    // a check that failed and was redone still leaves a good result; primenet gets the count
+    let (line, prime) = resultJSON(p: p, residue: toWords(bDig), N: N, gerbiczErrors: failures, proof: proofInfo, aid: assignment?.aid)
+    precondition(prime == isPRP, "type 1 residue disagrees with res64")
+    appendLine("results.txt", line)
+    print("M\(p) is \(prime ? "a probable prime" : "composite"), result written to results.txt")
     _ = try? FileManager.default.removeItem(atPath: savePath)
+    if let a = assignment {
+      removeLine(worktodoPath, a.line)
+      if wantProof && proofInfo == nil { print("no proof for this one, stopping so it can be looked at"); exit(4) }
+      if stopRequested == 0 {   // start again on the next line
+        fflush(stdout)
+        let argv = CommandLine.arguments.map { strdup($0) } + [nil]
+        execvp(CommandLine.arguments[0], argv)
+        print("could not restart: \(String(cString: strerror(errno)))"); exit(1)
+      }
+      exit(0)
+    }
+    if wantProof && proofInfo == nil { exit(4) }
   }
   if let dp = dumpPath {
     FileManager.default.createFile(atPath: dp, contents: nil)
