@@ -50,6 +50,7 @@ speed at M136279841 on an m4 macbook air (10 core gpu). whole numbers are big ju
 | 3.1 | last forward pass, tail and first inverse pass in one kernel; 2-multiply squaring in GF(M31^2) | 13.3 |
 | 3.2 | gerbicz-li checks (about 0.4% slower with the default settings) | 13.3 |
 | 3.3 | save files, so a long test can stop and resume | 13.3 |
+| 3.4 | prp proofs, the same files gpuowl and prmers make | 13.3 |
 
 over an 80 second run (5500 squarings) barnarg holds 14.5 ms, about 69 iterations per second. prmers averages about 68 over the same length of run, and that includes its gerbicz checks. so they're level on this air. barnarg now has the same checks (below), which cost it about 0.4%.
 
@@ -103,10 +104,30 @@ the file holds the current x and d and also the last verified pair, so an error 
 
 the multiply (x times d, not a square) goes through the plain passes and a two-input version of the tail kernel, since it only runs once per 1000 squarings.
 
+## prp proofs
+
+gimps wants a proof with every first-time prp test, so the server can check the result without anyone running the whole test again. it's pietrzak's verifiable delay function: the run keeps x_k at 2^power points, and afterwards they get folded into `power` middle values, with exponents taken from a sha3-256 hash chain. checking the proof then takes about p / 2^power squarings instead of p.
+
+a full checked run (`--gerbicz` with ITERS = p) does this by default with power 8. the residues go into `barnarg-<p>-proof/` as they're reached. if a gerbicz check fails later, the rollback goes back before them and they get written again. at the end barnarg builds the proof, checks it itself and writes `<p>-<power>.proof`:
+
+```sh
+./build/barnarg 86243 4096 86243 --gerbicz --L 100 --C 50 --proof 5
+# proof level 0: middle res64 adabb277f01dcae0, h 56d222f32855a5d7
+# ...
+# checking the proof: 2696 squarings
+# wrote 86243-5.proof and checked it (0.6 s)
+./build/barnarg verify 86243-5.proof 4096
+# 86243-5.proof: M86243 power 5, res64 0000000000000009, proof ok (0.3 s)
+```
+
+the file is gpuowl's version 2 format, the one primenet takes. i used the same points and the same folding order as gpuowl, so the file depends only on the number, not on the program. for M86243 at power 5, barnarg's proof is byte for byte the same as the one prmers writes (md5 `60b69c35a3d3403c2173ba598ba0f243`), and `make check` tests for that. `ref/proof_ref.py` does the same thing in gmpy2. it gave identical files for M86243, M86249 and M216091 (that one stopped with ctrl-c halfway and resumed), and it verified the M1257787 power 8 proof.
+
+at M136279841 power 8 keeps 256 residues of 17 mb, about 4.4 gb of disk until the proof is written. building the proof takes roughly 40,000 squarings' worth of work, and checking it 532,000 squarings (about 2 hours here), about 1% on top of the 22 days. `--proof N` changes the power, `--proof 0` turns it off.
+
 next:
 
 - a cheaper M31 multiply (it's about 10 integer ops now, not just the 2 multiplies).
-- prp proofs and autoprimenet.
+- autoprimenet and the json results line.
 
 ## build and run
 
@@ -128,6 +149,8 @@ arguments are `p N iterations [dumpfile k1,k2,...]`, plus `--gerbicz` for a chec
 
 - `src/barnarg.metal`: the gpu kernels.
 - `src/main.swift`: host side, tables and the iteration loop.
+- `src/proof.swift`: sha3, proof points, residue and proof files.
+- `ref/proof_ref.py`: proofs in gmpy2 (`make` and `verify`).
 - `ref/barnarg_ref.py`: the same algorithm in numpy, slow but simple.
 - `ref/ref_vectors.json`: gmp residues for 19 mersenne primes and 10 composites.
 - `test/`: checkers for gpu dumps.

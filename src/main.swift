@@ -1,5 +1,7 @@
 // barnarg: PRP squarings of 3 mod M_p on the mac gpu (metal).
-// Usage: barnarg_gpu P N ITERS [dumpfile k1,k2,...] [--kernels path]
+// Usage: barnarg P N ITERS [dumpfile k1,k2,...] [--kernels path]
+//        barnarg P N P --gerbicz [--proof POWER]     a full checked prp, with a proof
+//        barnarg verify FILE N                       check a proof file
 // Dump format: per checkpoint, u32 k, u32 N, then N x i32 balanced digits.
 // Prints the round-off (max |q - round(q)|, must stay < 0.5), error counters and us/iter.
 import Foundation
@@ -28,7 +30,11 @@ func rootOfUnity(_ N: Int) -> (UInt64, UInt64) {
 }
 
 var args = CommandLine.arguments.dropFirst().map { $0 }
-var kernelPath = "src/barnarg.metal"
+var kernelPath = "src/barnarg.metal"   // from the repo, or next to build/ when run from elsewhere
+if !FileManager.default.fileExists(atPath: kernelPath) {
+  kernelPath = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+    .deletingLastPathComponent().appendingPathComponent("../src/barnarg.metal").standardized.path
+}
 if let k = args.firstIndex(of: "--kernels") { kernelPath = args[k + 1]; args.removeSubrange(k...(k + 1)) }
 var maxRadix = 256  // 2 = plain radix-2 stages, 16 = radix-16 passes, 256 = threadgroup passes
 if let k = args.firstIndex(of: "--radix") { maxRadix = Int(args[k + 1])!; args.removeSubrange(k...(k + 1)) }
@@ -53,8 +59,17 @@ let noSave = args.contains("--nosave"); args.removeAll { $0 == "--nosave" }
 var stopRequested: sig_atomic_t = 0
 signal(SIGINT) { _ in stopRequested = 1 }
 signal(SIGTERM) { _ in stopRequested = 1 }
+// --proof P: keep residues for a prp proof of power P (full checked runs only, 0 = no proof)
+let proofPower = intFlag("--proof", 8)!
+// barnarg verify FILE N: check a proof file
+var verifyFile: (path: String, E: Int, B: [UInt32], middles: [[UInt32]])? = nil
+if args.first == "verify" {
+  guard args.count >= 3, let pf = readProof(args[1]) else { print("usage: barnarg verify FILE N (and FILE must be a v2 proof file)"); exit(2) }
+  verifyFile = (args[1], pf.E, pf.B, pf.middles)
+  args = [String(pf.E), args[2], "0"]
+}
 guard args.count >= 3, let p = Int(args[0]), let N = Int(args[1]), let iters = Int(args[2]) else {
-  print("usage: barnarg_gpu P N ITERS [dumpfile k1,k2,...]"); exit(2)
+  print("usage: barnarg P N ITERS [dumpfile k1,k2,...]  or  barnarg verify FILE N"); exit(2)
 }
 let dumpPath: String? = args.count >= 4 ? args[3] : nil
 let checkpoints = Set((args.count >= 5 ? args[4] : "").split(separator: ",").compactMap { Int($0) })
@@ -452,6 +467,110 @@ if profileMode {
   exit(0)
 }
 
+// ---- small helpers for the checked prp and the proofs ----
+func runGPU(_ body: (MTLComputeCommandEncoder) -> Void) {
+  let cb = q.makeCommandBuffer()!, e = cb.makeComputeCommandEncoder()!
+  body(e); e.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+  if let err = cb.error { print("gpu error:", err); exit(1) }
+}
+func square(_ b: MTLBuffer, _ n: Int) {
+  var left = n
+  while left > 0 {
+    let m = min(left, 256)
+    runGPU { e in for _ in 0..<m { curDig = b; encodeSquaring(e) } }
+    left -= m
+  }
+}
+func newDigits(_ v: Int32 = 0) -> MTLBuffer {
+  let b = dev.makeBuffer(length: N * 4, options: .storageModeShared)!
+  memset(b.contents(), 0, N * 4); b.contents().bindMemory(to: Int32.self, capacity: N)[0] = v
+  return b
+}
+func copyDigits(_ to: MTLBuffer, _ from: MTLBuffer) { memcpy(to.contents(), from.contents(), N * 4) }
+func toWords(_ b: MTLBuffer) -> [UInt32] { digitsToWords(b.contents().bindMemory(to: Int32.self, capacity: N), width, p) }
+func fromWords(_ w: [UInt32], _ b: MTLBuffer) { wordsToDigits(w, width, b.contents().bindMemory(to: Int32.self, capacity: N)) }
+
+// x = x^h * y, left to right. y must not be x.
+let bBase = newDigits()
+func powMul(_ x: MTLBuffer, _ h: UInt64, _ y: MTLBuffer) {
+  if h == 0 { copyDigits(x, y); return }
+  copyDigits(bBase, x)
+  let top = 63 - h.leadingZeroBitCount
+  runGPU { e in
+    for i in stride(from: top - 1, through: 0, by: -1) {
+      curDig = x; encodeSquaring(e)
+      if (h >> UInt64(i)) & 1 == 1 { encodeMul(e, x, bBase) }
+    }
+    encodeMul(e, x, y)
+  }
+}
+
+// ---- prp proofs ----
+// the run keeps x_k at the proof points in barnarg-<p>-proof/. after the test they are folded
+// into the middles, level by level, the same way as gpuowl (a stack of power + 1 numbers).
+let proofDir = "barnarg-\(p)-proof"
+func residuePath(_ k: Int) -> String { "\(proofDir)/\(k)" }
+func buildProof(_ power: Int) -> (B: [UInt32], middles: [[UInt32]])? {
+  let pts = proofPoints(p, power)
+  func load(_ k: Int) -> [UInt32]? {
+    let r = readResidue(residuePath(k), p)
+    if r == nil { print("\(residuePath(k)) is missing or damaged, can't make the proof") }
+    return r
+  }
+  guard let B = load(p) else { return nil }
+  var hash = proofHash(p, [], B)
+  var middles: [[UInt32]] = [], hashes: [UInt64] = []
+  let stack = (0...power).map { _ in newDigits() }
+  for level in 0..<power {
+    let s = 1 << (power - level - 1)
+    var top = 0
+    for i in 0..<(1 << level) {
+      guard let w = load(pts[s * (2 * i + 1) - 1]) else { return nil }
+      fromWords(w, stack[top]); top += 1
+      var b = 0
+      while i & (1 << b) != 0 {   // fold the top two: a = a^h * b
+        top -= 1
+        powMul(stack[top - 1], hashes[level - 1 - b], stack[top])
+        b += 1
+      }
+    }
+    let M = toWords(stack[0])
+    hash = proofHash(p, hash, M)
+    middles.append(M); hashes.append(h64(hash))
+    print(String(format: "proof level %d: middle res64 %016llx, h %016llx", level, UInt64(M[0]) | UInt64(M[1]) << 32, hashes.last!))
+  }
+  return (B, middles)
+}
+// the verifier's side: fold A = 3 and B down with the same hashes, then A^(2^span) must be B
+func verifyProof(_ B0: [UInt32], _ middles: [[UInt32]]) -> Bool {
+  if ([B0] + middles).contains(where: { $0.allSatisfy { $0 == 0 } }) { return false }
+  let A = newDigits(3)
+  var Bc = newDigits(), Mb = newDigits()
+  fromWords(B0, Bc)
+  var hash = proofHash(p, [], B0)
+  var span = p
+  for mw in middles {
+    hash = proofHash(p, hash, mw)
+    let h = h64(hash)
+    if span % 2 == 1 { square(Bc, 1) }
+    fromWords(mw, Mb); powMul(Mb, h, Bc); swap(&Bc, &Mb)   // B = M^h * B
+    fromWords(mw, Mb); powMul(A, h, Mb)                   // A = A^h * M
+    span = (span + 1) / 2
+  }
+  print("checking the proof: \(span) squarings")
+  square(A, span)
+  return sameValue(A, Bc)
+}
+
+if let vf = verifyFile {
+  let t = Date()
+  let ok = verifyProof(vf.B, vf.middles)
+  let r = UInt64(vf.B[0]) | UInt64(vf.B[1]) << 32
+  print(String(format: "%@: M%d power %d, res64 %016llx, %@ (%.1f s)", vf.path, p, vf.middles.count, r,
+               ok ? "proof ok" : "proof BAD", Date().timeIntervalSince(t)))
+  exit(ok ? 0 : 1)
+}
+
 // ---- PRP with gerbicz-li checks ----
 // x_k = 3^(2^k). every L squarings d <- d * x, so d_t = x_0 x_L ... x_tL. that gives
 // d_t = 3 * d_(t-1)^(2^L), and an error anywhere since the last check breaks it. every C blocks
@@ -460,11 +579,28 @@ if profileMode {
 if gerbicz {
   precondition(pack && maxRadix > 2, "gerbicz mode needs the packed transform")
   let L = gL, C = gC
-  func newDigits() -> MTLBuffer { let b = dev.makeBuffer(length: N * 4, options: .storageModeShared)!; memset(b.contents(), 0, N * 4); return b }
-  let bD = newDigits(), bT = newDigits(), bThree = newDigits()
-  bD.contents().bindMemory(to: Int32.self, capacity: N)[0] = 3
-  bThree.contents().bindMemory(to: Int32.self, capacity: N)[0] = 3
-  func copyDigits(_ to: MTLBuffer, _ from: MTLBuffer) { memcpy(to.contents(), from.contents(), N * 4) }
+  let bD = newDigits(3), bT = newDigits(), bThree = newDigits(3)
+  // proof residues are written as soon as x reaches a point. if a later check fails, the
+  // rollback goes back before that point and the file is written again.
+  let wantProof = proofPower > 0 && iters == p
+  let pts = wantProof ? proofPoints(p, proofPower) : []
+  let ptSet = Set(pts)
+  if wantProof {
+    try? FileManager.default.createDirectory(atPath: proofDir, withIntermediateDirectories: true)
+    print(String(format: "keeping %d residues for a power %d proof in %@ (%.1f gb)", pts.count, proofPower, proofDir,
+                 Double(pts.count * (residueBytes(p) + 8)) / 1e9))
+  }
+  func keep(_ k: Int, _ b: MTLBuffer) {
+    do { try writeResidue(residuePath(k), p, toWords(b)) } catch { print("could not write \(residuePath(k)): \(error)"); exit(1) }
+  }
+  func squareX(_ k0: Int, _ n: Int) {   // x from k0 to k0 + n, stopping at proof points
+    var k = k0
+    while k < k0 + n {
+      let next = pts.first { $0 > k && $0 <= k0 + n } ?? (k0 + n)
+      square(bDig, next - k); k = next
+      if ptSet.contains(k) && k < p { keep(k, bDig) }
+    }
+  }
   var savedX = [Int32](repeating: 0, count: N), savedD = savedX, savedK = 0
   func save(_ k: Int) {
     savedX.withUnsafeMutableBytes { _ = memcpy($0.baseAddress!, bDig.contents(), N * 4) }
@@ -479,15 +615,6 @@ if gerbicz {
   // save file: "BARNARG1", then p, N, k, verified k as u64, then x, d, verified x, verified d
   // (N x i32 each), then a 64-bit hash of everything before it. written to .tmp and renamed.
   let savePath = savePathFlag ?? "barnarg-\(p).save"
-  func hash64(_ data: Data) -> UInt64 {
-    var h: UInt64 = 0xcbf29ce484222325
-    data.withUnsafeBytes { raw in
-      let w = raw.bindMemory(to: UInt64.self)
-      for x in w { h = (h ^ x) &* 0x100000001b3; h ^= h >> 29 }
-      for b in raw.suffix(raw.count % 8) { h = (h ^ UInt64(b)) &* 0x100000001b3 }
-    }
-    return h
-  }
   func writeSave(_ k: Int) {
     if noSave { return }
     var data = Data("BARNARG1".utf8)
@@ -529,21 +656,7 @@ if gerbicz {
     return Int(hdr[2])
   }
 
-  var gpu = 0.0
-  func run(_ body: (MTLComputeCommandEncoder) -> Void) {
-    let cb = q.makeCommandBuffer()!, e = cb.makeComputeCommandEncoder()!
-    body(e); e.endEncoding(); cb.commit(); cb.waitUntilCompleted()
-    if let err = cb.error { print("gpu error:", err); exit(1) }
-    gpu += cb.gpuEndTime - cb.gpuStartTime
-  }
-  func square(_ b: MTLBuffer, _ n: Int) {
-    var left = n
-    while left > 0 {
-      let m = min(left, 256)
-      run { e in for _ in 0..<m { curDig = b; encodeSquaring(e) } }
-      left -= m
-    }
-  }
+  let run = runGPU
   save(0)
   var k = 0, checks = 0, failures = 0, injected = false, resumedAt = 0
   if let rk = loadSave() {
@@ -555,7 +668,7 @@ if gerbicz {
   let kFull = iters / L * L
   let start = Date()
   while k < kFull {
-    square(bDig, L); k += L
+    squareX(k, L); k += L
     if let at = injectAt, !injected, k >= at {
       bDig.contents().bindMemory(to: Int32.self, capacity: N)[1] += 1
       injected = true
@@ -588,7 +701,7 @@ if gerbicz {
   if r > 0 {
     while true {
       copyDigits(bT, bDig)
-      square(bDig, r); square(bT, r)
+      squareX(kFull, r); square(bT, r)
       if let at = injectAt, !injected, at > kFull {
         bDig.contents().bindMemory(to: Int32.self, capacity: N)[1] += 1
         injected = true
@@ -606,9 +719,28 @@ if gerbicz {
   let el = Date().timeIntervalSince(start)
   print(String(format: "p=%d N=%d iters=%d  res64=%016llx  %@  checks=%d failures=%d  roundoff=%.4f  %.1f iter/s (wall, checks included)",
                p, N, iters, rv, iters == p ? (isPRP ? "PRP" : "not PRP") : "", checks, failures, Float(bitPattern: st[0]), Double(iters - resumedAt) / el))
+  var proofNote = ""
+  if wantProof {
+    keep(p, bDig)
+    let tp = Date()
+    let proofPath = "\(p)-\(proofPower).proof"
+    if let pr = buildProof(proofPower) {
+      if verifyProof(pr.B, pr.middles) {
+        do {
+          try writeProof(proofPath, p, pr.B, pr.middles)
+          proofNote = "  proof=\(proofPath)"
+          _ = try? FileManager.default.removeItem(atPath: proofDir)
+          print(String(format: "wrote %@ and checked it (%.1f s)", proofPath, Date().timeIntervalSince(tp)))
+        } catch { print("could not write \(proofPath): \(error)") }
+      } else {
+        print("the proof did not check out, keeping \(proofDir) so it can be made again")
+      }
+    }
+    if proofNote.isEmpty { failures += 1 }
+  }
   if iters == p && failures == 0 || iters == p && injectAt != nil {
-    let line = String(format: "%@  M%d  %@  res64=%016llx  N=%d  checks=%d  failures=%d\n",
-                      ISO8601DateFormatter().string(from: Date()), p, isPRP ? "PRP" : "not PRP", rv, N, checks, failures)
+    let line = String(format: "%@  M%d  %@  res64=%016llx  N=%d  checks=%d  failures=%d%@\n",
+                      ISO8601DateFormatter().string(from: Date()), p, isPRP ? "PRP" : "not PRP", rv, N, checks, failures, proofNote)
     if let fh = FileHandle(forWritingAtPath: "results.txt") { fh.seekToEndOfFile(); fh.write(Data(line.utf8)); fh.closeFile() }
     else { FileManager.default.createFile(atPath: "results.txt", contents: Data(line.utf8)) }
     _ = try? FileManager.default.removeItem(atPath: savePath)
