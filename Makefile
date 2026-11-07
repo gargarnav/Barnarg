@@ -1,6 +1,17 @@
-build/barnarg: src/main.swift src/proof.swift src/results.swift src/ll.swift
+PREFIX ?= /usr/local
+SRC = src/main.swift src/proof.swift src/results.swift src/ll.swift
+
+build/barnarg: $(SRC) build/kernels.swift
+	swiftc -O $(SRC) build/kernels.swift -o build/barnarg
+
+# the metal source goes into the binary as a string, so build/barnarg works from any folder
+build/kernels.swift: src/barnarg.metal
 	mkdir -p build
-	swiftc -O src/main.swift src/proof.swift src/results.swift src/ll.swift -o build/barnarg
+	{ printf 'let embeddedKernels = #"""\n'; cat src/barnarg.metal; printf '\n"""#\n'; } > $@
+
+install: build/barnarg
+	mkdir -p $(PREFIX)/bin
+	install -m 755 build/barnarg $(PREFIX)/bin/barnarg
 
 check: build/barnarg
 	./build/barnarg 521 64 521 build/m521.bin 1,2,10,521
@@ -21,4 +32,4 @@ check: build/barnarg
 clean:
 	rm -rf build
 
-.PHONY: check clean
+.PHONY: check clean install

@@ -33,7 +33,7 @@ works, and about 1.2 times faster than prmers on an m4 air. every result so far 
 | test | fft | result |
 |---|---|---|
 | M86243, full prp | 4096 | prp (a known mersenne prime) |
-| M86249, full prp | 4096 | not prp, res64 `062d6633d5052b5f` |
+| M86249, full prp | 4096 | not prp, res64 `062d6633d5052b5f` (of 3^(2^p); the type 1 residue in results.txt is `56050b5b17ab3db5`) |
 | M216091, full prp | 16384 | prp (a known mersenne prime) |
 | M136279841, 60 squarings | 8M | matches gmp, round-off 0.012 |
 | M86243, M110503, M132049, M216091, full ll | 4096 to 16384 | prime (known mersenne primes) |
@@ -169,14 +169,14 @@ the result is one json line in `results.txt`, in the format prime95, gpuowl and 
 ```
 {"status":"C","exponent":86249,"worktype":"PRP-3","res64":"56050B5B17AB3DB5","res2048":"6309...3db5","residue-type":1,
  "errors":{"gerbicz":0},"shift-count":0,"fft-length":8192,"proof":{"version":2,"power":4,"hashsize":64,"md5":"277e80b2..."},
- "program":{"name":"barnarg","version":"3.6"},...,"checksum":{"version":1,"checksum":"6D2C9BBF"}}
+ "program":{"name":"barnarg","version":"3.7"},...,"checksum":{"version":1,"checksum":"6D2C9BBF"}}
 ```
 
 the residue is type 1, 3^(2^p - 2), so a prime gives 1. barnarg computes 3^(2^p), so it divides by 9 first (exactly, on the cpu). for M86249 the res64, res2048 and proof md5 are the same as prmers gives. the checksum is a crc32 over the fields joined by `;`, and the same code gives prmers's checksum for its own line.
 
 the fft size is the smallest power of 2 under about 18 bits per word at 4M, less 0.25 per doubling, which leaves some room under the limit from `research/fp32_model.py`. `--fft N` overrides it. M136279841 gets 8M.
 
-autoprimenet (by teal dulcet and daniel connelly) fetches the assignments, reports the results and uploads the proofs. it doesn't know barnarg, but barnarg uses the same files as prmers (`worktodo.txt`, `results.txt`, `proof/`), so its `--prmers` mode should work, except for the progress reports, which read prmers's own save files. i haven't run it against primenet yet. george woltman said on 8 nov 2026 that proof files that verify are enough for him, and the server side is being checked with sample results.
+autoprimenet (by teal dulcet and daniel connelly) fetches the assignments, reports the results and uploads the proofs. it doesn't know barnarg, but barnarg uses the same files as prmers (`worktodo.txt`, `results.txt`, `proof/`), so its `--prmers` mode should work, except for the progress reports, which read prmers's own save files. i haven't run it against primenet yet. george woltman said on 8 nov 2026 that proof files that verify are enough for him, and james heinrich checked a sample prp line and ll line the same day: both looked right and both checksums validated.
 
 skipped for now: known-factor (cofactor) tests, other bases and residue types, and certification work.
 
@@ -186,10 +186,14 @@ next:
 
 ## build and run
 
-needs xcode (for swiftc and metal). lucas-lehmer tests also need gmp (`brew install gmp`) for the jacobi check; prp doesn't. the checks need python with numpy and gmpy2.
+needs an apple silicon mac (m1 or later) and swiftc, which comes with xcode or just the command line tools (`xcode-select --install`). the kernels are compiled by metal at run time, so there's no separate shader build. lucas-lehmer tests also need gmp (`brew install gmp`) for the jacobi check; prp doesn't. the tests need python with numpy and gmpy2 (`pip install -r requirements.txt`).
+
+i've only run it on an m4 macbook air so far, so results from other chips would be useful.
 
 ```sh
+git clone https://github.com/gargarnav/Barnarg.git && cd Barnarg
 make
+make install            # copies build/barnarg to /usr/local/bin, or PREFIX=~/.local
 ./build/barnarg 86243 4096 86243 build/m86243.bin 1000,86243
 python3 test/check.py build/m86243.bin 86243
 # ok  k=   1000 value matches GMP  res64=e52db002b73401a8
@@ -198,7 +202,7 @@ python3 test/check.py build/m86243.bin 86243
 
 arguments are `p N iterations [dumpfile k1,k2,...]`, plus `--gerbicz` for a checked run. the dump has the digits at each checkpoint, which `test/check.py` compares against gmp (and against the cpu reference with `--ref K`). `--profile` times each kernel on its own.
 
-`make check` runs a small set of prps and compares them.
+`make check` runs a small set of prps, a proof, three lls and two injected errors, and compares them with gmp and with prmers's proof file. the gpu kernels are built into the binary, so after `make install` it runs from any folder (`--kernels FILE` compiles a different .metal file instead).
 
 ## files
 

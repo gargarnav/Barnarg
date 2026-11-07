@@ -46,11 +46,9 @@ if args.first.map({ Int($0) == nil && $0 != "verify" }) ?? true {
   print("M\(a.p) \(a.ll ? "LL" : "PRP") from \(worktodoPath)\(a.aid.map { ", assignment \($0)" } ?? ""), fft \(n)")
   args = (a.ll ? [String(a.p), String(n), String(a.p - 2), "--ll"] : [String(a.p), String(n), String(a.p), "--gerbicz"]) + args
 }
-var kernelPath = "src/barnarg.metal"   // from the repo, or next to build/ when run from elsewhere
-if !FileManager.default.fileExists(atPath: kernelPath) {
-  kernelPath = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
-    .deletingLastPathComponent().appendingPathComponent("../src/barnarg.metal").standardized.path
-}
+// the kernels are built into the binary (build/kernels.swift, made by the makefile), so it runs from
+// anywhere. --kernels FILE compiles a different .metal file instead, for experiments.
+var kernelPath: String? = nil
 if let k = args.firstIndex(of: "--kernels") { kernelPath = args[k + 1]; args.removeSubrange(k...(k + 1)) }
 var maxRadix = 256  // 2 = plain radix-2 stages, 16 = radix-16 passes, 256 = threadgroup passes
 if let k = args.firstIndex(of: "--radix") { maxRadix = Int(args[k + 1])!; args.removeSubrange(k...(k + 1)) }
@@ -137,7 +135,7 @@ for k in 0..<(N / 2) {
 
 // ---- Metal setup ----
 let dev = MTLCreateSystemDefaultDevice()!
-let src = try! String(contentsOfFile: kernelPath, encoding: .utf8)
+let src = try! kernelPath.map { try String(contentsOfFile: $0, encoding: .utf8) } ?? embeddedKernels
 let copts = MTLCompileOptions()
 if let defs = ProcessInfo.processInfo.environment["BARNARG_DEFS"] {   // timing experiments only
   var m: [String: NSObject] = [:]
