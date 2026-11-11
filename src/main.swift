@@ -32,6 +32,18 @@ func rootOfUnity(_ N: Int) -> (UInt64, UInt64) {
 }
 
 setvbuf(stdout, nil, _IOLBF, 0)   // line by line, so a log file or nohup.out keeps up
+// the logo, on a terminal only (never in a log or a pipe), in the layout the window fits; once per run,
+// not again when barnarg restarts itself on the next worktodo line. BARNARG_NOLOGO=1 turns it off, NO_COLOR drops the colour.
+func showLogo() {
+  guard isatty(1) == 1, getenv("BARNARG_NOLOGO") == nil else { return }
+  if let t = getenv("TERM"), String(cString: t) == "dumb" { return }
+  var ws = winsize()
+  let cols = ioctl(1, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 ? Int(ws.ws_col) : 80
+  guard let logo = [logoWide, logoTall].first(where: { cols >= $0.width }) else { return }
+  print(getenv("NO_COLOR") != nil ? logo.plain : logo.ansi)
+  setenv("BARNARG_NOLOGO", "1", 1)
+}
+showLogo()
 var args = CommandLine.arguments.dropFirst().map { $0 }
 // barnarg [work] [flags]: take the first assignment in worktodo.txt, run it as a checked prp
 // with a proof, write the json result to results.txt, take the line out and start the next one.

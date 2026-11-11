@@ -1,3 +1,5 @@
+<p align="center"><img src="logo.svg" alt="barnarg" width="100%"></p>
+
 # barnarg
 
 a mersenne prime tester (prp and lucas-lehmer) for the gpu in apple silicon macs, written in metal.
@@ -221,6 +223,8 @@ python3 test/check.py build/m86243.bin 86243
 ```
 
 arguments are `p N iterations [dumpfile k1,k2,...]`, plus `--gerbicz` for a checked run. the dump has the digits at each checkpoint, which `test/check.py` compares against gmp (and against the cpu reference with `--ref K`). `--profile` times each kernel on its own.
+
+on a terminal, barnarg starts with its logo (the same picture as at the top of this page). it's left out of logs and pipes, and when the window is too narrow; `BARNARG_NOLOGO=1` turns it off and `NO_COLOR=1` drops the colour.
 
 `make check` runs a small set of prps, a proof, three lls and two injected errors, and compares them with gmp and with prmers's proof file. the gpu kernels are built into the binary, so after `make install` it runs from any folder (`--kernels FILE` compiles a different .metal file instead).
 

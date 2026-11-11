@@ -1,5 +1,5 @@
 PREFIX ?= /usr/local
-SRC = src/main.swift src/proof.swift src/results.swift src/ll.swift
+SRC = src/main.swift src/proof.swift src/results.swift src/ll.swift src/logo.swift
 
 build/barnarg: $(SRC) build/kernels.swift
 	swiftc -O -target arm64-apple-macos13.0 $(SRC) build/kernels.swift -o build/barnarg
