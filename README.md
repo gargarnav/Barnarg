@@ -57,6 +57,7 @@ speed at M136279841 on an m4 macbook air (10 core gpu). whole numbers are big ju
 | 3.5 | cheaper M31 add, subtract and multiply (one `min` instead of a full reduction) | 11.2 |
 | 3.6 | worktodo.txt and json results, for autoprimenet | 11.2 |
 | 3.7 | lucas-lehmer tests with jacobi checks | 11.2 |
+| 3.7.1 | a progress line every 5 minutes with ms/iter and an eta | 11.2 |
 
 the air has no fan, so a long run is slower than these numbers. over 5000 squarings (about a minute, starting cool) 3.4 held 13.8 to 13.9 ms and 3.5 held 12.1 to 12.4 ms, about 81 iterations per second (two runs each, alternating, 2 minutes apart). prmers averaged about 68 over a run that long, including its gerbicz checks, so barnarg is now about 1.2 times faster than it on this mac. the checks cost barnarg about 0.4%.
 
@@ -195,7 +196,7 @@ next:
 the [releases page](https://github.com/gargarnav/Barnarg/releases) has a zip with the binary (apple silicon, macos 13 or later). the gpu kernels are inside the binary, so it's the only file you need. it isn't signed by apple, so macos blocks it the first time if it came through a browser. this takes the block off:
 
 ```sh
-unzip barnarg-3.7-macos-arm64.zip && cd barnarg-3.7
+unzip barnarg-3.7.1-macos-arm64.zip && cd barnarg-3.7.1
 xattr -d com.apple.quarantine barnarg
 ./barnarg 86243 4096 86243 --gerbicz --proof 0     # about 10 s: "M86243 is a probable prime"
 ```

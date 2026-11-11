@@ -6,7 +6,7 @@
 import CryptoKit
 import Foundation
 
-let barnargVersion = "3.7"
+let barnargVersion = "3.7.1"
 
 // v / 9 mod 2^p - 1, v given as ceil(p/32) words in [0, 2^p - 2]
 func divideBy9(_ v: [UInt32], _ p: Int) -> [UInt32] {
