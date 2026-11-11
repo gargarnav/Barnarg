@@ -100,6 +100,12 @@ defaults are L = 1000 and C = 400, so a check every 400,000 squarings (about 1.6
 
 ## save files
 
+every 5 minutes a full run prints a progress line (`--progress-every`, in seconds, 0 for none) with the speed since the last line and an eta from it:
+
+```
+k=1000  25.00%  13.75 ms/iter  eta 0h 00m 41s
+```
+
 a checked run saves to `barnarg-<p>.save` every 10 minutes (`--save-every`, in seconds), after every check that passes, and when you press ctrl-c (it finishes the block it's on first). running the same command again picks up where it left off:
 
 ```sh

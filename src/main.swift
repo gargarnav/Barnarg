@@ -70,6 +70,22 @@ let gL = intFlag("--L", 1000)!, gC = intFlag("--C", 400)!
 let injectAt = intFlag("--inject", nil)   // add 1 to a digit of x once at this iteration (tests the check)
 let saveEvery = intFlag("--save-every", 600)!   // seconds between save files
 let jacobiEvery = intFlag("--jacobi-every", 1800)!   // ll: seconds between jacobi checks
+let progressEvery = intFlag("--progress-every", 300)!   // seconds between progress lines (0 = none)
+// progress line: speed since the last line, so it follows the gpu's temperature, and an eta from that speed
+func hms(_ sec: Double) -> String {
+  let t = Int(sec.rounded()), d = t / 86400, h = t % 86400 / 3600, m = t % 3600 / 60
+  return d > 0 ? String(format: "%dd %02dh %02dm", d, h, m) : String(format: "%dh %02dm %02ds", h, m, t % 60)
+}
+func progress(_ k: Int, _ total: Int, _ last: inout (t: Date, k: Int)) {
+  let now = Date(), dk = k - last.k
+  guard progressEvery > 0, k < total, now.timeIntervalSince(last.t) >= Double(progressEvery) else { return }
+  if dk > 0 {
+    let ms = now.timeIntervalSince(last.t) * 1000 / Double(dk)
+    print(String(format: "k=%d  %.2f%%  %.2f ms/iter  eta %@", k, 100 * Double(k) / Double(total), ms,
+                 hms(Double(total - k) * ms / 1000)))
+  }
+  last = (now, k)
+}
 var savePathFlag: String? = nil
 if let k = args.firstIndex(of: "--save") { savePathFlag = args[k + 1]; args.removeSubrange(k...(k + 1)) }
 let noSave = args.contains("--nosave"); args.removeAll { $0 == "--nosave" }
@@ -658,7 +674,7 @@ if llMode && iters == p - 2 {
   var k = 0, checks = 0, failures = 0, failsHere = 0, injected = false, resumedAt = 0
   if let rk = loadSave() { k = rk; resumedAt = rk; print("resuming from \(savePath) at k=\(k) (last checked k=\(goodK))") }
   let start = Date()
-  var lastCheck = Date(), lastSave = Date()
+  var lastCheck = Date(), lastSave = Date(), lastProgress = (t: start, k: k)
   while k < iters {
     let n = min(1000, iters - k)
     square(bDig, n); k += n
@@ -682,11 +698,13 @@ if llMode && iters == p - 2 {
         let bad = k
         k = backToGood()
         print("k=\(bad)  jacobi check FAILED, going back to k=\(k)")
+        lastProgress = (Date(), k)
         if failsHere >= 3 { print("3 failures in a row from k=\(k), stopping so it can be looked at"); writeSave(k); exit(3) }
       }
     }
     if stopRequested != 0 { writeSave(k); print("stopped at k=\(k)\(noSave ? "" : ", saved to \(savePath)")"); exit(0) }
     if Date().timeIntervalSince(lastSave) >= Double(saveEvery) { writeSave(k); lastSave = Date() }
+    progress(k, iters, &lastProgress)
   }
   let s = toWords(bDig)
   let st = bStat.contents().bindMemory(to: UInt32.self, capacity: 4)
@@ -796,6 +814,7 @@ if gerbicz {
   var lastSave = Date()
   let kFull = iters / L * L
   let start = Date()
+  var lastProgress = (t: start, k: k)
   while k < kFull {
     squareX(k, L); k += L
     if let at = injectAt, !injected, k >= at {
@@ -820,10 +839,12 @@ if gerbicz {
         let bad = k
         k = restore()
         print("k=\(bad)  gerbicz check FAILED, going back to k=\(k)")
+        lastProgress = (Date(), k)
       }
     }
     if stopRequested != 0 { writeSave(k); print("stopped at k=\(k)\(noSave ? "" : ", saved to \(savePath)")"); exit(0) }
     if Date().timeIntervalSince(lastSave) >= Double(saveEvery) { writeSave(k); lastSave = Date() }
+    progress(k, iters, &lastProgress)
   }
   let r = iters - kFull
   if stopRequested != 0 { writeSave(k); print("stopped at k=\(k)\(noSave ? "" : ", saved to \(savePath)")"); exit(0) }
