@@ -43,6 +43,38 @@ func showLogo() {
   print(getenv("NO_COLOR") != nil ? logo.plain : logo.ansi)
   setenv("BARNARG_NOLOGO", "1", 1)
 }
+let helpText = """
+barnarg \(barnargVersion), mersenne prp and ll tests on apple silicon gpus
+
+gimps work, same files as prime95:
+  barnarg                  runs the PRP=, PRPDC=, Test= and DoubleCheck= lines in worktodo.txt.
+                           results go to results.txt, proofs to proof/. ctrl-c saves, run it again to resume.
+    --fft N                pick the fft length yourself (power of 2)
+    --proof POWER          proof power, default 8 (0 for no proof)
+
+  e.g.  echo "PRP=N/A,1,2,136279841,-1" > worktodo.txt
+        barnarg
+
+one exponent by hand (N is the fft length):
+  barnarg P N P --gerbicz       checked prp of 2^P - 1, with a proof
+  barnarg P N P-2 --ll         lucas-lehmer test, with jacobi checks
+  barnarg verify FILE N        check a proof file
+
+speed test, 2000 squarings at the wavefront (about 40 s on an m4 air):
+  barnarg 136279841 8388608 2000 --gerbicz --proof 0 --nosave
+
+other flags:
+  --progress-every S    progress line every S seconds (default 300, 0 for none)
+  --save-every S        save file every S seconds (default 600)
+  --jacobi-every S      ll only, jacobi check every S seconds (default 1800)
+  --nosave              don't write save files
+
+BARNARG_NOLOGO=1 hides the logo, NO_COLOR=1 shows it without colour.
+make check and the README have the rest: https://github.com/gargarnav/Barnarg
+"""
+if CommandLine.arguments.dropFirst().contains(where: { ["-h", "--help", "help"].contains($0) }) { print(helpText); exit(0) }
+// barnarg logo: just the logo (make check shows it once this way, then turns it off)
+if CommandLine.arguments.dropFirst().first == "logo" { unsetenv("BARNARG_NOLOGO"); showLogo(); exit(0) }
 showLogo()
 var args = CommandLine.arguments.dropFirst().map { $0 }
 // barnarg [work] [flags]: take the first assignment in worktodo.txt, run it as a checked prp
@@ -115,7 +147,7 @@ if args.first == "verify" {
   args = [String(pf.E), args[2], "0"]
 }
 guard args.count >= 3, let p = Int(args[0]), let N = Int(args[1]), let iters = Int(args[2]) else {
-  print("usage: barnarg P N ITERS [dumpfile k1,k2,...]  or  barnarg verify FILE N"); exit(2)
+  print("usage: barnarg P N ITERS [dumpfile k1,k2,...]  or  barnarg verify FILE N  (barnarg -h for more)"); exit(2)
 }
 let dumpPath: String? = args.count >= 4 ? args[3] : nil
 let checkpoints = Set((args.count >= 5 ? args[4] : "").split(separator: ",").compactMap { Int($0) })

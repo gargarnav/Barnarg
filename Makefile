@@ -21,7 +21,10 @@ install: build/barnarg
 	mkdir -p $(PREFIX)/bin
 	install -m 755 build/barnarg $(PREFIX)/bin/barnarg
 
+# make check starts barnarg a dozen times, so the logo goes once at the top and not after every line
+check: export BARNARG_NOLOGO = 1
 check: build/barnarg
+	@./build/barnarg logo
 	./build/barnarg 521 64 521 build/m521.bin 1,2,10,521
 	python3 test/check.py build/m521.bin 521 --ref 10
 	./build/barnarg 86243 4096 1000 build/m86243.bin 1,2,20,1000

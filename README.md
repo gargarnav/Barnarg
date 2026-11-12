@@ -209,7 +209,7 @@ lucas-lehmer tests also need gmp (`brew install gmp`).
 
 needs an apple silicon mac (m1 or later) and swiftc, which comes with xcode or just the command line tools (`xcode-select --install`). the kernels are compiled by metal at run time, so there's no separate shader build. lucas-lehmer tests also need gmp (`brew install gmp`) for the jacobi check; prp doesn't. the tests need python with numpy and gmpy2 (`pip install -r requirements.txt`).
 
-i've only run it on an m4 macbook air so far, so results from other chips would be useful.
+i've mostly run it on my m4 macbook air. wigglefruit on mersenneforum ran `make check` on an m4 pro (20-core gpu) and it passed. results from other chips would help a lot.
 
 ```sh
 git clone https://github.com/gargarnav/Barnarg.git && cd Barnarg
@@ -222,9 +222,9 @@ python3 test/check.py build/m86243.bin 86243
 # ok  k=  86243 value matches GMP  res64=0000000000000009  PRP=yes
 ```
 
-arguments are `p N iterations [dumpfile k1,k2,...]`, plus `--gerbicz` for a checked run. the dump has the digits at each checkpoint, which `test/check.py` compares against gmp (and against the cpu reference with `--ref K`). `--profile` times each kernel on its own.
+`barnarg -h` shows the usual commands. for the tests, arguments are `p N iterations [dumpfile k1,k2,...]`, plus `--gerbicz` for a checked run. the dump has the digits at each checkpoint, which `test/check.py` compares against gmp (and against the cpu reference with `--ref K`). `--profile` times each kernel on its own.
 
-on a terminal, barnarg starts with its logo (the same picture as at the top of this page). it's left out of logs and pipes, and when the window is too narrow; `BARNARG_NOLOGO=1` turns it off and `NO_COLOR=1` drops the colour.
+on a terminal, barnarg starts with its logo (the same picture as at the top of this page). it's left out of logs and pipes and when the window is too narrow, and `make check` shows it just once at the top. `BARNARG_NOLOGO=1` turns it off and `NO_COLOR=1` drops the colour.
 
 `make check` runs a small set of prps, a proof, three lls and two injected errors, and compares them with gmp and with prmers's proof file. the gpu kernels are built into the binary, so after `make install` it runs from any folder (`--kernels FILE` compiles a different .metal file instead).
 
