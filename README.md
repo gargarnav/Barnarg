@@ -26,6 +26,8 @@ both use the irrational base weighting from crandall and fagin, so there's no ze
 - the N-th root of 2 is itself a power of 2 (2^u with u = N^-1 mod 31), so applying a weight is a 31-bit rotation, not a multiply.
 - every root of unity of order up to 2^31 has norm 1, so conj(w) = 1/w, same as complex numbers. that lets the real input be packed into N/2 complex values and split back after the transform, exactly.
 
+none of this maths is new. the fp32 + GF(M31^2) hybrid, the weights as shifts, the 8th roots of unity as 2^15 (1 + i) and conj(w) = 1/w are all in george woltman's [prpll-ntt](https://github.com/gwoltman/gpuowl) (2025), which also has M31-only, M61 and other transform types. barnarg's part is doing it in metal, since prpll-ntt needs opencl 2.0 and macos only has 1.2, and making it fast on apple gpus. see [credits](#credits).
+
 at an 8M fft the fp32 side carries about 18.4 bits per word, the same as fp64 on an nvidia card, with 8 bytes per word.
 
 ## status
@@ -63,9 +65,9 @@ speed at M136279841 on an m4 macbook air (10 core gpu). whole numbers are big ju
 
 the air has no fan, so a long run is slower than these numbers. over 5000 squarings (about a minute, starting cool) 3.4 held 13.8 to 13.9 ms and 3.5 held 12.1 to 12.4 ms, about 81 iterations per second (two runs each, alternating, 2 minutes apart). prmers averaged about 68 over a run that long, including its gerbicz checks, so barnarg is now about 1.2 times faster than it on this mac. the checks cost barnarg about 0.4%.
 
-the M31 change: every value stays in [0, P), so a + b and a - b + P are both under 2P, and one conditional subtract is enough. `min(x, x - P)` does that in 2 instructions, since x - P wraps to something huge when x < P. the multiply works the same way if you multiply by 2b instead of b: a * 2b = hi * 2^32 + lo, so a * b = hi + lo / 2 mod P, and both halves are already under P. that's 7 instructions instead of 12. on its own the cheaper multiply was only 12% faster in `research/mulbench.swift`, because the adds and subtracts around it cost as much. with both, a GF(M31^2) product went from 30 to 47 billion a second.
+the M31 change: every value stays in [0, P), so a + b and a - b + P are both under 2P, and one conditional subtract is enough. `min(x, x - P)` does that in 2 instructions, since x - P wraps to something huge when x < P. the multiply works the same way if you multiply by 2b instead of b: a * 2b = hi * 2^32 + lo, so a * b = hi + lo / 2 mod P, and both halves are already under P. that's 7 instructions instead of 12. on its own the cheaper multiply was only 12% faster in `research/mulbench.swift`, because the adds and subtracts around it cost as much. with both, a GF(M31^2) product went from 30 to 47 billion a second. both tricks were in prpll-ntt first: the `min` reduction by mark rose (october 2026) and the multiply by 2b (twiddles stored times 2, `cmulScaled`) by george woltman (november 2026).
 
-the 8th roots trick: the host picks the roots of unity so that W_8 = 2^15 (1 + i). that works because (2^15 (1 + i))^2 = 2^31 i = i. multiplying by any 8th root is then an add, a subtract and a 15-bit rotation, so radix-8 butterflies on the M31 side need no multiplies at all.
+the 8th roots trick: the host picks the roots of unity so that W_8 = 2^15 (1 + i). that works because (2^15 (1 + i))^2 = 2^31 i = i. multiplying by any 8th root is then an add, a subtract and a 15-bit rotation, so radix-8 butterflies on the M31 side need no multiplies at all. prpll-ntt does the same (`mul_t8`).
 
 the biggest single jump (24.5 to 16 ms) came from writing the 16 point dft out by hand. the generic loop version wasn't being fully unrolled, so its arrays ended up in slow memory. as 4x4, the 4 point dfts need no multiplies (W_4 = ±i) and only 3 of the 9 twiddles between them aren't 8th roots.
 
@@ -240,6 +242,15 @@ on a terminal, barnarg starts with its logo (the same picture as at the top of t
 - `ref/ref_vectors.json`: gmp residues for 19 mersenne primes and 10 composites.
 - `test/`: checkers for gpu dumps.
 - `research/`: the bandwidth benchmark, the threadgroup handoff test and the fp32 error model.
+
+## credits
+
+- the transform comes from george woltman's [prpll-ntt](https://github.com/gwoltman/gpuowl), the gpuowl fork by woltman, mark rose and others, built on mihai preda's gpuowl: the fp32 + GF(M31^2) hybrid and its M31 tricks (weights as shifts, 8th roots as 2^15 (1 + i), conj(w) = 1/w, the `min` reduction by mark rose and the multiply by 2b by george woltman). barnarg ports these to metal.
+- irrational base weighting: richard crandall and barry fagin.
+- the gerbicz check: robert gerbicz. prp proofs: krzysztof pietrzak's scheme, in gpuowl's version 2 format.
+- [prmers](https://github.com/cherubrock-seb/PrMers) by cherubrock-seb: the comparison point, and its proof and result files were the reference barnarg was checked against.
+- [autoprimenet](https://github.com/tdulcet/AutoPrimeNet) by teal dulcet and daniel connelly.
+- george woltman and james heinrich for checking the results format, and wigglefruit and frmky on mersenneforum for runs on an m4 pro and an m3.
 
 ## license
 
